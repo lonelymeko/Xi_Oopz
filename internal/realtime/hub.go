@@ -139,9 +139,14 @@ func (h *Hub) unregister(client *Client) {
 			delete(h.userClients, client.user.ID)
 		}
 	}
+	remainingClients := len(h.userClients[client.user.ID])
 	state := h.refreshDomainUserLocked(client.user.ID)
 	h.mu.Unlock()
 
+	if remainingClients == 0 {
+		h.removeUserFromAllVoiceChannels(client.user.ID, 0)
+		h.removeUserFromAllScreeningRooms(client.user.ID, 0)
+	}
 	if state == nil {
 		h.removeDomainUser(client.user.ID)
 	} else {
@@ -431,6 +436,7 @@ func (h *Hub) joinChannel(client *Client, channelID int64) error {
 	if client.currentChannelID == channelID {
 		return nil
 	}
+	h.removeUserFromAllVoiceChannels(client.user.ID, channelID)
 	if client.currentChannelID != 0 {
 		h.leaveChannel(client, true)
 	}
@@ -526,6 +532,7 @@ func (h *Hub) joinScreening(client *Client, channelID int64) error {
 		client.sendJSON("screening.snapshot", snapshot)
 		return nil
 	}
+	h.removeUserFromAllScreeningRooms(client.user.ID, channelID)
 	if client.currentScreeningChannelID != 0 {
 		h.leaveScreening(client, client.currentScreeningChannelID)
 	}
@@ -607,6 +614,98 @@ func (h *Hub) leaveScreening(client *Client, channelID int64) {
 		}, nil)
 	}
 	_ = h.broadcastScreeningSnapshot(channelID)
+}
+
+func (h *Hub) removeUserFromAllVoiceChannels(userID, exceptChannelID int64) {
+	var staleChannels []int64
+
+	h.mu.Lock()
+	for channelID, users := range h.channelUsers {
+		if channelID == exceptChannelID {
+			continue
+		}
+		if _, ok := users[userID]; !ok {
+			continue
+		}
+		delete(users, userID)
+		if len(users) == 0 {
+			delete(h.channelUsers, channelID)
+		}
+		if clients, ok := h.channelClients[channelID]; ok {
+			for client := range clients {
+				if client.user.ID != userID {
+					continue
+				}
+				delete(clients, client)
+				if client.currentChannelID == channelID {
+					client.currentChannelID = 0
+				}
+			}
+			if len(clients) == 0 {
+				delete(h.channelClients, channelID)
+			}
+		}
+		staleChannels = append(staleChannels, channelID)
+	}
+	state := h.refreshDomainUserLocked(userID)
+	h.mu.Unlock()
+
+	for _, channelID := range staleChannels {
+		log.Printf("[voice-backend] cleanup stale voice membership user=%d removed_channel=%d keep_channel=%d", userID, channelID, exceptChannelID)
+		h.removePresence(channelID, userID)
+		h.broadcastToChannel(channelID, "member.left", map[string]any{
+			"channelId": channelID,
+			"userId":    userID,
+		}, nil)
+	}
+	if state == nil {
+		h.removeDomainUser(userID)
+	} else {
+		h.persistDomainUser(state)
+	}
+}
+
+func (h *Hub) removeUserFromAllScreeningRooms(userID, exceptChannelID int64) {
+	var staleChannels []int64
+
+	h.mu.Lock()
+	for channelID, clients := range h.screeningClients {
+		if channelID == exceptChannelID {
+			continue
+		}
+		removed := false
+		for client := range clients {
+			if client.user.ID != userID {
+				continue
+			}
+			delete(clients, client)
+			if client.currentScreeningChannelID == channelID {
+				client.currentScreeningChannelID = 0
+			}
+			removed = true
+		}
+		if len(clients) == 0 {
+			delete(h.screeningClients, channelID)
+		}
+		if removed {
+			staleChannels = append(staleChannels, channelID)
+		}
+	}
+	h.mu.Unlock()
+
+	for _, channelID := range staleChannels {
+		log.Printf("[screening-backend] cleanup stale screening membership user=%d removed_channel=%d keep_channel=%d", userID, channelID, exceptChannelID)
+		viewers, err := h.removeScreeningViewer(channelID, userID)
+		if err != nil {
+			log.Printf("screening stale cleanup error: %v", err)
+			continue
+		}
+		if len(viewers) == 0 {
+			h.clearScreeningRoom(channelID)
+			continue
+		}
+		_ = h.broadcastScreeningSnapshot(channelID)
+	}
 }
 
 func (h *Hub) replaceScreeningURL(client *Client, payload ScreeningReplacePayload) error {

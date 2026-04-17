@@ -138,6 +138,8 @@ export type PeerConnectionDiagnostics = {
   userId: number;
   latencyMs: number | null;
   transport: "lan" | "stun" | "turn" | "unknown";
+  retryCount: number;
+  recoveryMode: "stable" | "ice-restart" | "relay";
   updatedAt: number;
 };
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -34,7 +35,7 @@ func main() {
 	}
 
 	log.Printf("oopz listening on http://localhost:%s", cfg.Port)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Printf("server stopped: %v", err)
 		os.Exit(1)
 	}

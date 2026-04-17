@@ -345,6 +345,26 @@ sudo systemctl reload nginx
 
 ## 当前实现说明
 
+### 本次修补说明
+
+这一次主要集中修了语音房在线状态、WebRTC 重连链路，以及 TURN 诊断可观测性。
+
+已修复的问题：
+
+- 用户异常退出浏览器或 WebSocket 断开后，可能仍残留在 Redis 的频道在线列表里，导致同一个账号看起来同时挂在多个频道。
+- 用户退出语音频道后，前端仍可能继续响应残留的 RTC 信令，出现“已经退出频道，但别人还能听到声音”的异常。
+- 首轮 WebRTC 协商在部分情况下会重复创建 peer、重复发送 offer，导致 `answer ignored`、`m-line` 顺序异常，以及后续 TURN fallback 判断失真。
+- TURN / STUN 切换过程之前缺少足够日志，难以判断到底是没有拿到 relay candidate，还是虽然拿到了但没有被选中。
+
+本次改进：
+
+- 后端在用户加入频道前，会先清理该用户在其它语音频道和放映室中的残留成员记录，保证单用户同一时间只在一个频道在线。
+- 后端在 WebSocket 连接完全断开且该用户没有其它活跃连接时，会把该用户从所有 Redis presence / screening viewers 中兜底清除，并同步移出在线状态。
+- 前端语音会话增加了显式的 `voiceSessionActive` 保护；离开频道后不再处理新的 RTC 信令或重连流程，避免被远端残留消息重新拉起 PeerConnection。
+- WebRTC 首次建连现在默认同时下发 STUN + TURN，并使用 `iceTransportPolicy: "all"`；首次失败先 `ICE restart`，再次失败再升级为 `relay-only` 重建。
+- 前端补充了 ICE 配置、candidate、selected pair、频道状态变更等调试日志，便于排查“为何自动离房”“为何没有切到 TURN”“为何退出后音频未停”等问题。
+- 连接诊断面板现在会显示实际链路类型（局域网 / STUN / TURN）、RTT、重试次数，以及当前恢复方式（稳定 / ICE 重启 / TURN 中继）。
+
 ### 关于“降噪”
 
 当前项目里的“降噪”不是独立 AI 降噪引擎，而是浏览器 `getUserMedia` 约束：
