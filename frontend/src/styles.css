@@ -62,6 +62,7 @@ button {
 .main-panel,
 .member-sidebar {
   border-right: 1px solid var(--line);
+  min-height: 0;
 }
 
 .server-rail {
@@ -120,6 +121,12 @@ button {
   flex-direction: column;
   padding: 22px 18px;
   background: rgba(11, 17, 26, 0.94);
+  overflow: hidden;
+  min-height: 0;
+}
+
+.member-sidebar {
+  height: 100%;
   overflow: hidden;
 }
 
@@ -436,8 +443,7 @@ button {
   padding: 18px 22px 22px;
   background: linear-gradient(180deg, rgba(8, 12, 19, 0.95), rgba(10, 14, 23, 0.95));
   overflow-x: hidden;
-  overflow-y: hidden;
-  min-height: 0;
+  overflow-y: auto;
 }
 
 .main-panel--screening {
@@ -872,11 +878,8 @@ button {
 }
 
 .chat-panel {
-  flex: 1 1 auto;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  gap: 10px;
-  height: 100%;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
   overflow: hidden;
 }
@@ -891,7 +894,7 @@ button {
 }
 
 .chat-panel--screening .chat-panel__toolbar {
-  margin-bottom: 0;
+  margin-bottom: 10px;
 }
 
 .chat-panel--screening .message-list {
@@ -910,7 +913,7 @@ button {
   justify-content: space-between;
   align-items: center;
   gap: 16px;
-  margin-bottom: 0;
+  margin-bottom: 12px;
 }
 
 .chat-panel__icons {
@@ -927,6 +930,7 @@ button {
 }
 
 .message-list {
+  flex: 1;
   overflow: auto;
   display: flex;
   flex-direction: column;
@@ -974,6 +978,7 @@ button {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
+  margin-top: 14px;
   padding-top: 14px;
   border-top: 1px solid var(--line);
   background: linear-gradient(180deg, rgba(12, 18, 28, 0), rgba(12, 18, 28, 0.98) 28%);
@@ -997,7 +1002,8 @@ button {
 
 .member-list {
   flex: 1;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -1080,6 +1086,7 @@ body {
 .main-panel,
 .member-sidebar {
   border-right: 1px solid #232323;
+  min-height: 0;
 }
 
 .server-rail {
@@ -1646,8 +1653,6 @@ body {
   gap: 10px;
   padding: 22px 24px 18px;
   background: #121212;
-  overflow: hidden;
-  min-height: 0;
 }
 
 .top-utility-bar {
@@ -1827,11 +1832,10 @@ body {
 .chat-panel {
   min-height: 0;
   padding: 0;
-  gap: 10px;
 }
 
 .chat-panel__toolbar {
-  margin-bottom: 0;
+  margin-bottom: 10px;
   padding: 8px 0 14px;
   border-bottom: 1px solid #232323;
 }
@@ -1877,8 +1881,6 @@ body {
 .message-list {
   gap: 24px;
   padding-right: 8px;
-  min-height: 0;
-  overflow: auto;
 }
 
 .message-row {
@@ -1911,6 +1913,7 @@ body {
 .composer {
   grid-template-columns: 1fr;
   gap: 0;
+  margin-top: 10px;
   padding-top: 10px;
   border-top: 1px solid #232323;
   background: transparent;
@@ -2039,6 +2042,9 @@ body {
 
 .member-list {
   gap: 10px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
 }
 
 .member-section {
