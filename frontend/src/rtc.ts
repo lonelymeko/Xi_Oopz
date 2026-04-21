@@ -18,7 +18,9 @@ type PeerWrapper = {
   reconnectTimer: number | null;
   reconnecting: boolean;
   useRelayOnly: boolean;
+  lastKnownTransport: PeerConnectionDiagnostics["transport"];
   statsTimer: number | null;
+  stableTimer: number | null;
   suppressNegotiationNeeded: boolean;
 };
 
@@ -83,6 +85,7 @@ export class RTCController {
   private static readonly PEER_RECONNECT_MAX_ATTEMPTS = 4;
   private static readonly PEER_STATS_INTERVAL_MS = 3000;
   private static readonly ICE_GATHERING_EVAL_DELAY_MS = 800;
+  private static readonly PEER_STABLE_RESET_MS = 8000;
 
   private localAudioStream: MediaStream | null = null;
   private localMicStream: MediaStream | null = null;
@@ -781,7 +784,9 @@ export class RTCController {
       reconnectTimer: null,
       reconnecting: false,
       useRelayOnly: relayOnly,
+      lastKnownTransport: relayOnly ? "turn" : "unknown",
       statsTimer: null,
+      stableTimer: null,
       suppressNegotiationNeeded: false,
     };
 
@@ -869,35 +874,49 @@ export class RTCController {
 
     pc.addEventListener("iceconnectionstatechange", () => {
       if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
-        this.clearPeerReconnect(wrapper);
+        this.clearPeerReconnect(wrapper, false);
         this.clearPeerDisconnectTimer(user.id);
+        this.scheduleStableReset(wrapper);
         this.startPeerStats(wrapper);
         return;
       }
       if (pc.iceConnectionState === "disconnected") {
-        this.schedulePeerReconnect(user.id, RTCController.PEER_RECONNECT_DELAY_MS, "ice-disconnected");
+        this.cancelStableReset(wrapper);
+        this.schedulePeerReconnect(
+          user.id,
+          wrapper.useRelayOnly || wrapper.lastKnownTransport === "turn" ? 0 : RTCController.PEER_RECONNECT_DELAY_MS,
+          "ice-disconnected",
+        );
         return;
       }
       if (pc.iceConnectionState === "failed") {
+        this.cancelStableReset(wrapper);
         this.schedulePeerReconnect(user.id, 0, "ice-failed");
       }
     });
 
     pc.addEventListener("connectionstatechange", () => {
       if (pc.connectionState === "connected") {
-        this.clearPeerReconnect(wrapper);
+        this.clearPeerReconnect(wrapper, false);
         this.clearPeerDisconnectTimer(user.id);
+        this.scheduleStableReset(wrapper);
         this.startPeerStats(wrapper);
         return;
       }
       if (pc.connectionState === "disconnected") {
+        this.cancelStableReset(wrapper);
         this.schedulePeerDisconnectCleanup(user.id);
         this.ensureMediaFlow(user.id, "audio", "peer-disconnected");
         this.ensureMediaFlow(user.id, "screen", "peer-disconnected");
-        this.schedulePeerReconnect(user.id, RTCController.PEER_RECONNECT_DELAY_MS, "peer-disconnected");
+        this.schedulePeerReconnect(
+          user.id,
+          wrapper.useRelayOnly || wrapper.lastKnownTransport === "turn" ? 0 : RTCController.PEER_RECONNECT_DELAY_MS,
+          "peer-disconnected",
+        );
         return;
       }
       if (pc.connectionState === "failed") {
+        this.cancelStableReset(wrapper);
         this.schedulePeerReconnect(user.id, 0, "peer-failed");
         return;
       }
@@ -1127,13 +1146,35 @@ export class RTCController {
     return `${userId}:${kind}`;
   }
 
-  private clearPeerReconnect(wrapper: PeerWrapper) {
+  private clearPeerReconnect(wrapper: PeerWrapper, resetAttempts = true) {
     if (wrapper.reconnectTimer) {
       window.clearTimeout(wrapper.reconnectTimer);
       wrapper.reconnectTimer = null;
     }
-    wrapper.reconnectAttempts = 0;
+    if (resetAttempts) {
+      wrapper.reconnectAttempts = 0;
+    }
     wrapper.reconnecting = false;
+  }
+
+  private scheduleStableReset(wrapper: PeerWrapper) {
+    this.cancelStableReset(wrapper);
+    wrapper.stableTimer = window.setTimeout(() => {
+      wrapper.stableTimer = null;
+      if (
+        wrapper.pc.connectionState === "connected" ||
+        wrapper.pc.iceConnectionState === "connected" ||
+        wrapper.pc.iceConnectionState === "completed"
+      ) {
+        wrapper.reconnectAttempts = 0;
+      }
+    }, RTCController.PEER_STABLE_RESET_MS);
+  }
+
+  private cancelStableReset(wrapper: PeerWrapper) {
+    if (!wrapper.stableTimer) return;
+    window.clearTimeout(wrapper.stableTimer);
+    wrapper.stableTimer = null;
   }
 
   private schedulePeerReconnect(userId: number, delayMs: number, reason: string) {
@@ -1148,7 +1189,10 @@ export class RTCController {
       return;
     }
     const nextAttempt = wrapper.reconnectAttempts + 1;
-    const turnFallback = wrapper.useRelayOnly || (nextAttempt >= 2 && this.getRelayIceServers().length > 0);
+    const turnFallback =
+      wrapper.useRelayOnly ||
+      wrapper.lastKnownTransport === "turn" ||
+      (nextAttempt >= 2 && this.getRelayIceServers().length > 0);
     wrapper.reconnectTimer = window.setTimeout(() => {
       wrapper.reconnectTimer = null;
       void this.attemptPeerReconnect(userId, reason);
@@ -1178,7 +1222,10 @@ export class RTCController {
     wrapper.reconnectAttempts += 1;
     wrapper.reconnecting = true;
     const attempt = wrapper.reconnectAttempts;
-    const shouldUseRelayOnly = wrapper.useRelayOnly || (attempt >= 2 && this.getRelayIceServers().length > 0);
+    const shouldUseRelayOnly =
+      wrapper.useRelayOnly ||
+      wrapper.lastKnownTransport === "turn" ||
+      (attempt >= 2 && this.getRelayIceServers().length > 0);
 
     try {
       if (
@@ -1242,7 +1289,8 @@ export class RTCController {
     const nextWrapper = await this.ensurePeer(user, shouldOffer, relayOnly);
     await this.bindLocalTracks(nextWrapper, true);
     nextWrapper.reconnecting = false;
-    nextWrapper.reconnectAttempts = 0;
+    nextWrapper.reconnectAttempts = relayOnly ? 1 : 0;
+    nextWrapper.lastKnownTransport = relayOnly ? "turn" : nextWrapper.lastKnownTransport;
     if (shouldOffer) {
       await this.sendOffer(nextWrapper);
     }
@@ -1255,6 +1303,7 @@ export class RTCController {
       return;
     }
     this.clearPeerReconnect(wrapper);
+    this.cancelStableReset(wrapper);
     this.clearPeerDisconnectTimer(userId);
     this.clearMediaReconnect(userId, "audio");
     this.clearMediaReconnect(userId, "screen");
@@ -1329,6 +1378,9 @@ export class RTCController {
       const localCandidateType = (localCandidate as RTCStats & { candidateType?: string } | undefined)?.candidateType || null;
       const remoteCandidateType = (remoteCandidate as RTCStats & { candidateType?: string } | undefined)?.candidateType || null;
       const transport = this.resolveTransportType(localCandidate, remoteCandidate);
+      if (transport !== "unknown") {
+        wrapper.lastKnownTransport = transport;
+      }
       const latencyMs =
         typeof pair?.currentRoundTripTime === "number"
           ? Math.round(pair.currentRoundTripTime * 1000)
