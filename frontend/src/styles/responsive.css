@@ -1,0 +1,56 @@
+@media (max-width: 1280px) {
+  .app-shell {
+    grid-template-columns: 76px 280px minmax(0, 1fr);
+  }
+
+  .member-sidebar {
+    display: none;
+  }
+}
+
+@media (max-width: 960px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .server-rail,
+  .member-sidebar {
+    display: none;
+  }
+
+  .channel-sidebar {
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .section-title-row,
+  .voice-presence-dock__title,
+  .chat-panel__toolbar,
+  .screen-modal__toolbar {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .composer {
+    grid-template-columns: 1fr;
+  }
+
+  .voice-orb--sharing {
+    min-width: 196px;
+  }
+
+  .voice-orb__avatar--sharing {
+    width: 184px;
+    height: 104px;
+  }
+
+  body {
+    overflow: auto;
+  }
+
+  #root,
+  .app-shell {
+    height: auto;
+    min-height: 100vh;
+  }
+}

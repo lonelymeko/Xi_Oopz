@@ -1,11 +1,12 @@
 import type { AuthResponse, BootstrapResponse, Channel, ChannelCategory, Domain, DomainPresenceResponse, Message, User } from "./types";
+import { buildApiUrl } from "./config/runtime";
 
 const JSON_HEADERS = {
   "Content-Type": "application/json",
 };
 
 export async function createGuestUser(displayName: string): Promise<User> {
-  const response = await fetch("/api/users/guest", {
+  const response = await fetch(buildApiUrl("/api/users/guest"), {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify({ displayName }),
@@ -28,7 +29,7 @@ export async function registerAccount(input: {
   password: string;
   code: string;
 }): Promise<AuthResponse> {
-  const response = await fetch("/api/auth/register", {
+  const response = await fetch(buildApiUrl("/api/auth/register"), {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify(input),
@@ -40,7 +41,7 @@ export async function registerAccount(input: {
 }
 
 export async function sendVerificationCode(input: { email: string }): Promise<{ message: string; cooldown: number; expiresIn: number; emailDebug: boolean }> {
-  const response = await fetch("/api/auth/send-verification-code", {
+  const response = await fetch(buildApiUrl("/api/auth/send-verification-code"), {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify(input),
@@ -55,7 +56,7 @@ export async function loginAccount(input: {
   email: string;
   password: string;
 }): Promise<AuthResponse> {
-  const response = await fetch("/api/auth/login", {
+  const response = await fetch(buildApiUrl("/api/auth/login"), {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify(input),
@@ -67,7 +68,7 @@ export async function loginAccount(input: {
 }
 
 export async function fetchMe(token: string): Promise<User> {
-  const response = await fetch("/api/auth/me", {
+  const response = await fetch(buildApiUrl("/api/auth/me"), {
     headers: authHeaders(token),
   });
   if (!response.ok) {
@@ -86,7 +87,7 @@ export async function fetchBootstrap(token: string, channelId?: number, domainId
   }
 
   const query = params.toString();
-  const response = await fetch(`/api/bootstrap${query ? `?${query}` : ""}`, {
+  const response = await fetch(buildApiUrl(`/api/bootstrap${query ? `?${query}` : ""}`), {
     headers: authHeaders(token),
   });
   if (!response.ok) {
@@ -99,7 +100,7 @@ export async function createDomain(
   token: string,
   input: { name: string; description: string; accentColor?: string },
 ): Promise<Domain> {
-  const response = await fetch("/api/domains", {
+  const response = await fetch(buildApiUrl("/api/domains"), {
     method: "POST",
     headers: { ...JSON_HEADERS, ...authHeaders(token) },
     body: JSON.stringify(input),
@@ -115,7 +116,7 @@ export async function createCategory(
   token: string,
   input: { name: string; position?: number },
 ): Promise<ChannelCategory> {
-  const response = await fetch(`/api/domains/${domainId}/categories`, {
+  const response = await fetch(buildApiUrl(`/api/domains/${domainId}/categories`), {
     method: "POST",
     headers: { ...JSON_HEADERS, ...authHeaders(token) },
     body: JSON.stringify(input),
@@ -131,7 +132,7 @@ export async function createChannel(
   token: string,
   input: { categoryId?: number; name: string; type: "text" | "voice" | "screening"; topic?: string; position?: number; maxMembers?: number },
 ): Promise<Channel> {
-  const response = await fetch(`/api/domains/${domainId}/channels`, {
+  const response = await fetch(buildApiUrl(`/api/domains/${domainId}/channels`), {
     method: "POST",
     headers: { ...JSON_HEADERS, ...authHeaders(token) },
     body: JSON.stringify(input),
@@ -143,7 +144,7 @@ export async function createChannel(
 }
 
 export async function fetchChannelMessages(domainId: number, channelId: number, token: string): Promise<Message[]> {
-  const response = await fetch(`/api/domains/${domainId}/channels/${channelId}/messages`, {
+  const response = await fetch(buildApiUrl(`/api/domains/${domainId}/channels/${channelId}/messages`), {
     headers: authHeaders(token),
   });
   if (!response.ok) {
@@ -153,7 +154,7 @@ export async function fetchChannelMessages(domainId: number, channelId: number, 
 }
 
 export async function fetchDomainPresence(domainId: number, token: string): Promise<DomainPresenceResponse> {
-  const response = await fetch(`/api/domains/${domainId}/presence`, {
+  const response = await fetch(buildApiUrl(`/api/domains/${domainId}/presence`), {
     headers: authHeaders(token),
   });
   if (!response.ok) {

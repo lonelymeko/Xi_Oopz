@@ -134,8 +134,30 @@ go run ./cmd/server
 
 ```bash
 cd frontend
-npm install
-npm run dev
+pnpm install
+pnpm dev
+```
+
+前端开发环境默认采用“直连后端”模式（不经过 Vite 代理），请先配置：
+
+```bash
+cd frontend
+# Windows PowerShell 示例
+@"
+VITE_API_BASE_URL=https://oopz.xixiu.top
+VITE_WS_BASE_URL=wss://oopz.xixiu.top
+"@ | Set-Content .env.development
+```
+
+如果你改过配置但浏览器仍命中旧地址，请先停止已有 `vite` 进程再重新执行 `pnpm dev`。
+
+推荐在本地提交流程中执行：
+
+```bash
+cd frontend
+pnpm lint
+pnpm run format:check
+pnpm run test:run
 ```
 
 开发模式访问：
@@ -148,8 +170,8 @@ http://localhost:5173
 
 ```bash
 cd frontend
-npm install
-npm run build
+pnpm install
+pnpm run build
 cd ..
 go run ./cmd/server
 ```
