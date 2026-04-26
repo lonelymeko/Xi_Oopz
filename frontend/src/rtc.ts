@@ -807,9 +807,6 @@ export class RTCController {
         relayOnly,
         type: event.candidate.type || "unknown",
         protocol: event.candidate.protocol || "unknown",
-        address: event.candidate.address || null,
-        port: event.candidate.port || null,
-        candidate: event.candidate.candidate,
       });
       this.socket.send("rtc.ice_candidate", {
         channelId: this.getCurrentVoiceChannelId(),
