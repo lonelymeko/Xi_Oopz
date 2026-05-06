@@ -125,11 +125,6 @@ button {
   min-height: 0;
 }
 
-.member-sidebar {
-  height: 100%;
-  overflow: hidden;
-}
-
 .mobile-domain-strip {
   display: none;
   margin-bottom: 14px;
