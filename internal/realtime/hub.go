@@ -532,10 +532,11 @@ func (h *Hub) joinScreening(client *Client, channelID int64) error {
 		client.sendJSON("screening.snapshot", snapshot)
 		return nil
 	}
-	h.removeUserFromAllScreeningRooms(client.user.ID, channelID)
-	if client.currentScreeningChannelID != 0 {
-		h.leaveScreening(client, client.currentScreeningChannelID)
+	previousScreeningChannelID := client.currentScreeningChannelID
+	if previousScreeningChannelID != 0 {
+		h.leaveScreening(client, previousScreeningChannelID)
 	}
+	h.removeUserFromAllScreeningRooms(client.user.ID, channelID)
 
 	h.mu.Lock()
 	client.currentScreeningChannelID = channelID
@@ -703,6 +704,29 @@ func (h *Hub) removeUserFromAllScreeningRooms(userID, exceptChannelID int64) {
 		if len(viewers) == 0 {
 			h.clearScreeningRoom(channelID)
 			continue
+		}
+		state, err := h.loadOrInitScreeningState(channelID, 0)
+		if err == nil && state.ControllerUserID == userID {
+			nextController := viewers[rand.Intn(len(viewers))].User.ID
+			previousControllerID := state.ControllerUserID
+			state.ControllerUserID = nextController
+			state.UpdatedAt = time.Now().UTC()
+			_ = h.saveScreeningState(channelID, state)
+			nextControllerName := ""
+			for _, viewer := range viewers {
+				if viewer.User.ID == nextController {
+					nextControllerName = viewer.User.DisplayName
+					break
+				}
+			}
+			log.Printf("[screening-backend] stale-controller-transfer channel=%d previous=%d next=%d", channelID, previousControllerID, nextController)
+			h.broadcastToScreening(channelID, "screening.controller.changed", map[string]any{
+				"channelId":              channelID,
+				"previousControllerId":   previousControllerID,
+				"previousControllerName": "",
+				"controllerUserId":       nextController,
+				"controllerName":         nextControllerName,
+			}, nil)
 		}
 		_ = h.broadcastScreeningSnapshot(channelID)
 	}

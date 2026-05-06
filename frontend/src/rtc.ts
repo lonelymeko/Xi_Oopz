@@ -21,7 +21,6 @@ type PeerWrapper = {
   lastKnownTransport: PeerConnectionDiagnostics["transport"];
   statsTimer: number | null;
   stableTimer: number | null;
-  suppressNegotiationNeeded: boolean;
 };
 
 type SignalPayload = {
@@ -787,7 +786,6 @@ export class RTCController {
       lastKnownTransport: relayOnly ? "turn" : "unknown",
       statsTimer: null,
       stableTimer: null,
-      suppressNegotiationNeeded: false,
     };
 
     pc.addEventListener("icecandidate", (event) => {
@@ -935,23 +933,16 @@ export class RTCController {
     const [audioTrack] = includeLocalTracks ? this.localAudioStream?.getAudioTracks() || [] : [];
     const [screenTrack] = includeLocalTracks ? this.localScreenStream?.getVideoTracks() || [] : [];
 
-    wrapper.suppressNegotiationNeeded = true;
-    try {
-      await wrapper.audioTransceiver.sender.replaceTrack(audioTrack || null);
-      wrapper.audioTransceiver.direction = audioTrack ? "sendrecv" : "recvonly";
+    await wrapper.audioTransceiver.sender.replaceTrack(audioTrack || null);
+    wrapper.audioTransceiver.direction = audioTrack ? "sendrecv" : "recvonly";
 
-      await wrapper.displayAudioTransceiver.sender.replaceTrack(null);
-      wrapper.displayAudioTransceiver.direction = "recvonly";
+    await wrapper.displayAudioTransceiver.sender.replaceTrack(null);
+    wrapper.displayAudioTransceiver.direction = "recvonly";
 
-      await wrapper.screenTransceiver.sender.replaceTrack(screenTrack || null);
-      wrapper.screenTransceiver.direction = screenTrack ? "sendrecv" : "recvonly";
+    await wrapper.screenTransceiver.sender.replaceTrack(screenTrack || null);
+    wrapper.screenTransceiver.direction = screenTrack ? "sendrecv" : "recvonly";
 
-      wrapper.hasBoundLocalTracks = includeLocalTracks;
-    } finally {
-      queueMicrotask(() => {
-        wrapper.suppressNegotiationNeeded = false;
-      });
-    }
+    wrapper.hasBoundLocalTracks = includeLocalTracks;
   }
 
   private async applyLocalTracksToAllPeers() {
