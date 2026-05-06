@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState, useCallback } from "react";
 
 import { ChannelSidebar } from "../components/live/ChannelSidebar";
 import { LiveMainPanel } from "../components/live/LiveMainPanel";
@@ -74,6 +74,7 @@ export function LivePage() {
   const [maximizedScreenKey, setMaximizedScreenKey] = useState<string | null>(null);
   const [voiceTargetChannelId, setVoiceTargetChannelId] = useState<number | null>(null);
   const [screeningSnapshot, setScreeningSnapshot] = useState<ScreeningSnapshot | null>(null);
+  const clearScreeningSnapshot = useCallback(() => setScreeningSnapshot(null), [setScreeningSnapshot]);
   const [screeningChannelMembers, setScreeningChannelMembers] = useState<Record<string, User[]>>({});
   const [screeningUrlInput, setScreeningUrlInput] = useState("");
   const [screeningTitleInput, setScreeningTitleInput] = useState("");
@@ -153,7 +154,7 @@ export function LivePage() {
     setMessages,
     setVoiceTargetChannelId,
     setOnlineCounts,
-    setScreeningSnapshot: () => setScreeningSnapshot(null),
+    setScreeningSnapshot: clearScreeningSnapshot,
     setStatus,
     setCurrentVoiceChannelId,
     setVoiceMembers,
