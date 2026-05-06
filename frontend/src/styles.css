@@ -121,7 +121,8 @@ button {
   flex-direction: column;
   padding: 22px 18px;
   background: rgba(11, 17, 26, 0.94);
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   min-height: 0;
 }
 
