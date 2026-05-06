@@ -5,6 +5,7 @@ import { clearSession, saveSession } from "../services/session";
 import type {
   BootstrapResponse,
   Channel,
+  DomainPresenceResponse,
   Message,
   OnlineUserPresence,
   PeerConnectionDiagnostics,
@@ -228,6 +229,21 @@ export function useSessionDomain(options: UseSessionDomainOptions) {
           if (preferredActiveChannel?.type !== "screening") {
             setScreeningSnapshot(null);
           }
+
+          try {
+            const presence: DomainPresenceResponse = await liveFacade.fetchDomainPresence(data.domain.id, session.token);
+            const nextOnlineUsers = new Map<number, OnlineUserPresence>();
+            for (const entry of presence.onlineUsers || []) {
+              nextOnlineUsers.set(entry.user.id, entry);
+            }
+            setOnlineUsers(nextOnlineUsers);
+            if (presence.onlineCounts) {
+              setOnlineCounts({ ...data.onlineCounts, ...presence.onlineCounts });
+            }
+          } catch {
+            // presence fetch failure is non-fatal
+          }
+
           setStatus("页面已就绪");
         } catch (error) {
           if (requestVersion !== bootstrapRequestVersionRef.current) {

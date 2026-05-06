@@ -82,6 +82,8 @@ export class RTCController {
   private static readonly PEER_DISCONNECT_GRACE_MS = 5000;
   private static readonly PEER_RECONNECT_DELAY_MS = 2000;
   private static readonly PEER_RECONNECT_MAX_ATTEMPTS = 4;
+  private static readonly TURN_DISCONNECT_GRACE_MS = 1000;
+  private static readonly ICE_RESTART_TIMEOUT_MS = 4000;
   private static readonly PEER_STATS_INTERVAL_MS = 3000;
   private static readonly ICE_GATHERING_EVAL_DELAY_MS = 800;
   private static readonly PEER_STABLE_RESET_MS = 8000;
@@ -359,7 +361,7 @@ export class RTCController {
         if (!this.voiceSessionActive) {
           return;
         }
-        this.log("reconnect:reset-received", { userId: peerUser.id, reason: payload.reason || "remote-reset" });
+        this.log("reconnect:reset-received", { userId: peerUser.id, reason: payload.reason || "remote-reset", relayOnly: Boolean(payload.relayOnly) });
         await this.recreatePeer(peerUser.id, payload.reason || "remote-reset", false, Boolean(payload.relayOnly));
         return;
       }
@@ -879,7 +881,7 @@ export class RTCController {
         this.cancelStableReset(wrapper);
         this.schedulePeerReconnect(
           user.id,
-          wrapper.useRelayOnly || wrapper.lastKnownTransport === "turn" ? 0 : RTCController.PEER_RECONNECT_DELAY_MS,
+          wrapper.useRelayOnly || wrapper.lastKnownTransport === "turn" ? RTCController.TURN_DISCONNECT_GRACE_MS : RTCController.PEER_RECONNECT_DELAY_MS,
           "ice-disconnected",
         );
         return;
@@ -905,7 +907,7 @@ export class RTCController {
         this.ensureMediaFlow(user.id, "screen", "peer-disconnected");
         this.schedulePeerReconnect(
           user.id,
-          wrapper.useRelayOnly || wrapper.lastKnownTransport === "turn" ? 0 : RTCController.PEER_RECONNECT_DELAY_MS,
+          wrapper.useRelayOnly || wrapper.lastKnownTransport === "turn" ? RTCController.TURN_DISCONNECT_GRACE_MS : RTCController.PEER_RECONNECT_DELAY_MS,
           "peer-disconnected",
         );
         return;
@@ -1210,15 +1212,14 @@ export class RTCController {
     wrapper.reconnectAttempts += 1;
     wrapper.reconnecting = true;
     const attempt = wrapper.reconnectAttempts;
-    const shouldUseRelayOnly =
-      wrapper.useRelayOnly ||
-      wrapper.lastKnownTransport === "turn" ||
+    const switchingToRelay =
+      !wrapper.useRelayOnly && wrapper.lastKnownTransport !== "turn" &&
       (attempt >= 2 && this.getRelayIceServers().length > 0);
+    const isTurnConnection = wrapper.useRelayOnly || wrapper.lastKnownTransport === "turn";
 
     try {
       if (
-        !shouldUseRelayOnly &&
-        attempt < RTCController.PEER_RECONNECT_MAX_ATTEMPTS &&
+        !switchingToRelay &&
         wrapper.pc.signalingState === "stable" &&
         !wrapper.makingOffer
       ) {
@@ -1229,17 +1230,20 @@ export class RTCController {
           targetUserId: wrapper.user.id,
           sdp: wrapper.pc.localDescription?.sdp,
         });
-        this.log("reconnect:ice-restart", { userId: wrapper.user.id, attempt, reason });
+        this.log("reconnect:ice-restart", { userId: wrapper.user.id, attempt, reason, relayOnly: wrapper.useRelayOnly });
         wrapper.reconnecting = false;
-        this.schedulePeerReconnect(userId, RTCController.PEER_RECONNECT_DELAY_MS, "ice-restart-timeout");
+        const timeout = isTurnConnection ? RTCController.ICE_RESTART_TIMEOUT_MS : RTCController.PEER_RECONNECT_DELAY_MS;
+        this.schedulePeerReconnect(userId, timeout, "ice-restart-timeout");
         return;
       }
 
+      const shouldUseRelayOnly = switchingToRelay || wrapper.useRelayOnly || wrapper.lastKnownTransport === "turn";
       await this.recreatePeer(userId, reason, true, shouldUseRelayOnly);
     } catch (error) {
       console.error(error);
       wrapper.reconnecting = false;
       if (attempt >= RTCController.PEER_RECONNECT_MAX_ATTEMPTS) {
+        const shouldUseRelayOnly = wrapper.useRelayOnly || wrapper.lastKnownTransport === "turn";
         await this.recreatePeer(userId, "reconnect-max-attempts", true, shouldUseRelayOnly);
         return;
       }
