@@ -65,6 +65,7 @@ type RTCSignalPayload struct {
 	Candidate    string `json:"candidate,omitempty"`
 	Kind         string `json:"kind,omitempty"`
 	Reason       string `json:"reason,omitempty"`
+	RelayOnly    bool   `json:"relayOnly,omitempty"`
 }
 
 type ScreeningJoinPayload struct {

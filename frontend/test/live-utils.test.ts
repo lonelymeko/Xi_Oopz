@@ -34,6 +34,8 @@ describe("live utils", () => {
         userId: 1,
         latencyMs: 34,
         transport: "turn",
+        retryCount: 2,
+        recoveryMode: "relay",
         updatedAt: Date.now(),
       }),
     ).toContain("TURN");

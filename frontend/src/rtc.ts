@@ -18,7 +18,9 @@ type PeerWrapper = {
   reconnectTimer: number | null;
   reconnecting: boolean;
   useRelayOnly: boolean;
+  lastKnownTransport: PeerConnectionDiagnostics["transport"];
   statsTimer: number | null;
+  stableTimer: number | null;
 };
 
 type SignalPayload = {
@@ -28,6 +30,7 @@ type SignalPayload = {
   candidate?: string;
   kind?: "audio" | "screen";
   reason?: string;
+  relayOnly?: boolean;
 };
 
 type MediaSyncKind = "audio" | "screen";
@@ -56,6 +59,11 @@ const RTC_DEBUG_LABELS = new Set([
   "acquireAudioStream:fallback:completed",
   "acquireAudioStream:fallback:failed",
   "peer:created",
+  "ice:config",
+  "ice:candidate",
+  "ice:gathering-complete",
+  "ice:no-usable-pair",
+  "ice:selected-pair",
   "track:received",
   "negotiate:start",
   "negotiate:offer-sent",
@@ -74,14 +82,20 @@ export class RTCController {
   private static readonly PEER_DISCONNECT_GRACE_MS = 5000;
   private static readonly PEER_RECONNECT_DELAY_MS = 2000;
   private static readonly PEER_RECONNECT_MAX_ATTEMPTS = 4;
+  private static readonly TURN_DISCONNECT_GRACE_MS = 1000;
+  private static readonly ICE_RESTART_TIMEOUT_MS = 4000;
   private static readonly PEER_STATS_INTERVAL_MS = 3000;
+  private static readonly ICE_GATHERING_EVAL_DELAY_MS = 800;
+  private static readonly PEER_STABLE_RESET_MS = 8000;
 
   private localAudioStream: MediaStream | null = null;
+  private localMicStream: MediaStream | null = null;
   private localScreenStream: MediaStream | null = null;
   private prewarmedAudioStream: MediaStream | null = null;
   private audioAcquirePromise: Promise<MediaStream> | null = null;
   private prewarmReleaseTimer: number | null = null;
   private peers = new Map<number, PeerWrapper>();
+  private peerEnsurePromises = new Map<number, Promise<PeerWrapper>>();
   private remoteMedia = new Map<number, RemoteMedia>();
   private mediaReconnectAttempts = new Map<string, number>();
   private mediaReconnectTimers = new Map<string, number>();
@@ -89,6 +103,14 @@ export class RTCController {
   private audioInputDeviceId = "";
   private noiseSuppressionEnabled = true;
   private micEnabled = true;
+  private screenAudioEnabled = false;
+  private voiceSessionActive = false;
+  private mixContext: AudioContext | null = null;
+  private mixDestination: MediaStreamAudioDestinationNode | null = null;
+  private micSourceNode: MediaStreamAudioSourceNode | null = null;
+  private micGainNode: GainNode | null = null;
+  private screenSourceNode: MediaStreamAudioSourceNode | null = null;
+  private screenGainNode: GainNode | null = null;
 
   private log(label: string, extra?: Record<string, unknown>) {
     if (!RTC_DEBUG_LABELS.has(label)) {
@@ -120,7 +142,13 @@ export class RTCController {
 
   async joinVoice(channelId: number) {
     const startedAt = performance.now();
+    this.voiceSessionActive = true;
     this.log("joinVoice:start", { channelId });
+    this.log("ice:config", {
+      channelId,
+      all: this.describeIceServers(this.getIceServers()),
+      relay: this.describeIceServers(this.getRelayIceServers()),
+    });
     await this.ensureAudio();
     this.log("joinVoice:audio-ready", { channelId, elapsedMs: Math.round(performance.now() - startedAt) });
     this.socket.send("channel.join", { channelId });
@@ -129,15 +157,21 @@ export class RTCController {
 
   async leaveVoice() {
     const startedAt = performance.now();
+    this.voiceSessionActive = false;
     this.log("leaveVoice:start", { channelId: this.getCurrentVoiceChannelId() });
     this.socket.send("channel.leave", { channelId: this.getCurrentVoiceChannelId() });
     this.closeAllPeers();
+    this.teardownAudioMix();
     this.stopTrackGroup(this.localAudioStream);
+    this.stopTrackGroup(this.localMicStream);
     this.stopTrackGroup(this.prewarmedAudioStream);
     this.stopTrackGroup(this.localScreenStream);
     this.localAudioStream = null;
+    this.localMicStream = null;
     this.prewarmedAudioStream = null;
     this.localScreenStream = null;
+    this.screenAudioEnabled = false;
+    this.peerEnsurePromises.clear();
     this.clearPrewarmReleaseTimer();
     this.onLocalAudioChanged(null);
     this.onLocalScreenChanged(null);
@@ -146,10 +180,7 @@ export class RTCController {
 
   async toggleMic(enabled: boolean) {
     this.micEnabled = enabled;
-    if (!this.localAudioStream) return;
-    this.localAudioStream.getAudioTracks().forEach((track) => {
-      track.enabled = enabled;
-    });
+    await this.syncLocalAudioState();
   }
 
   async setAudioInputDevice(deviceId: string) {
@@ -244,6 +275,7 @@ export class RTCController {
 
     this.localScreenStream = await navigator.mediaDevices.getDisplayMedia(displayOptions as DisplayMediaStreamOptions);
     this.onLocalScreenChanged(this.localScreenStream);
+    this.screenAudioEnabled = this.hasLiveScreenAudio();
 
     const [screenTrack] = this.localScreenStream.getVideoTracks();
     screenTrack?.addEventListener("ended", () => {
@@ -252,10 +284,12 @@ export class RTCController {
 
     this.localScreenStream.getAudioTracks().forEach((track) => {
       track.addEventListener("ended", () => {
-        void this.applyLocalTracksToAllPeers();
+        this.screenAudioEnabled = this.hasLiveScreenAudio();
+        void this.syncLocalAudioState();
       });
     });
 
+    await this.syncLocalAudioState();
     await this.applyLocalTracksToAllPeers();
   }
 
@@ -263,7 +297,9 @@ export class RTCController {
     if (!this.localScreenStream) return;
     this.stopTrackGroup(this.localScreenStream);
     this.localScreenStream = null;
+    this.screenAudioEnabled = false;
     this.onLocalScreenChanged(null);
+    await this.syncLocalAudioState();
     await this.applyLocalTracksToAllPeers();
 
     if (notifyServer && this.getCurrentVoiceChannelId()) {
@@ -275,6 +311,7 @@ export class RTCController {
   }
 
   async handlePresenceSnapshot(members: PresenceMember[]) {
+    if (!this.voiceSessionActive) return;
     const startedAt = performance.now();
     const selfId = this.getCurrentUser()?.id;
     const seen = new Set<number>();
@@ -282,7 +319,8 @@ export class RTCController {
     for (const member of members) {
       if (member.user.id === selfId) continue;
       seen.add(member.user.id);
-      await this.ensurePeer(member.user, true);
+      const shouldOffer = selfId != null && selfId < member.user.id;
+      await this.ensurePeer(member.user, shouldOffer);
       this.ensureMediaFlow(member.user.id, "audio", "presence.snapshot");
       this.ensureMediaFlow(member.user.id, "screen", "presence.snapshot");
     }
@@ -297,24 +335,34 @@ export class RTCController {
   }
 
   async handleMemberJoined(member: PresenceMember) {
+    if (!this.voiceSessionActive) return;
     if (member.user.id === this.getCurrentUser()?.id) return;
-    await this.ensurePeer(member.user, false);
+    const selfId = this.getCurrentUser()?.id;
+    const shouldOffer = selfId != null && selfId < member.user.id;
+    await this.ensurePeer(member.user, shouldOffer);
     this.ensureMediaFlow(member.user.id, "audio", "member.joined");
     this.ensureMediaFlow(member.user.id, "screen", "member.joined");
   }
 
   handleMemberLeft(userId: number) {
+    if (!this.voiceSessionActive) return;
     this.destroyPeer(userId);
   }
 
   async handleSignal(type: string, payload: SignalPayload) {
+    if (!this.voiceSessionActive && type !== "rtc.reset") {
+      return;
+    }
     try {
       const peerUser = this.lookupUser(payload.sourceUserId);
       if (!peerUser) return;
 
       if (type === "rtc.reset") {
-        this.log("reconnect:reset-received", { userId: peerUser.id, reason: payload.reason || "remote-reset" });
-        await this.recreatePeer(peerUser.id, payload.reason || "remote-reset", false);
+        if (!this.voiceSessionActive) {
+          return;
+        }
+        this.log("reconnect:reset-received", { userId: peerUser.id, reason: payload.reason || "remote-reset", relayOnly: Boolean(payload.relayOnly) });
+        await this.recreatePeer(peerUser.id, payload.reason || "remote-reset", false, Boolean(payload.relayOnly));
         return;
       }
 
@@ -397,13 +445,13 @@ export class RTCController {
       noiseSuppressionEnabled: this.noiseSuppressionEnabled,
       hasPrewarmedStream: Boolean(this.prewarmedAudioStream),
     });
-    this.localAudioStream = await this.getOrAcquireAudioStream();
-    if (this.prewarmedAudioStream === this.localAudioStream) {
+    this.localMicStream = await this.getOrAcquireAudioStream();
+    if (this.prewarmedAudioStream === this.localMicStream) {
       this.log("ensureAudio:reused-prewarmed-stream");
       this.prewarmedAudioStream = null;
     }
     this.clearPrewarmReleaseTimer();
-    this.onLocalAudioChanged(this.localAudioStream);
+    await this.rebuildOutboundAudio();
     this.log("ensureAudio:getUserMedia:completed", { elapsedMs: Math.round(performance.now() - startedAt) });
     return this.localAudioStream;
   }
@@ -417,19 +465,19 @@ export class RTCController {
     });
     const nextStream = await this.acquireAudioStream();
 
-    this.stopTrackGroup(this.localAudioStream);
-    this.localAudioStream = nextStream;
+    this.stopTrackGroup(this.localMicStream);
+    this.localMicStream = nextStream;
     this.prewarmedAudioStream = null;
     this.clearPrewarmReleaseTimer();
-    this.onLocalAudioChanged(this.localAudioStream);
+    await this.rebuildOutboundAudio();
 
     await this.applyLocalTracksToAllPeers();
     this.log("refreshAudioInput:completed", { peers: this.peers.size, elapsedMs: Math.round(performance.now() - startedAt) });
   }
 
   private getOrAcquireAudioStream() {
-    if (this.localAudioStream) {
-      return Promise.resolve(this.localAudioStream);
+    if (this.localMicStream) {
+      return Promise.resolve(this.localMicStream);
     }
     if (this.prewarmedAudioStream) {
       return Promise.resolve(this.prewarmedAudioStream);
@@ -568,6 +616,100 @@ export class RTCController {
     this.clearPrewarmReleaseTimer();
   }
 
+  private ensureAudioMix() {
+    if (this.mixContext && this.mixDestination) {
+      return;
+    }
+    const Context = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Context) {
+      throw new Error("当前浏览器不支持 Web Audio 混音");
+    }
+    this.mixContext = new Context();
+    this.mixDestination = this.mixContext.createMediaStreamDestination();
+    this.localAudioStream = this.mixDestination.stream;
+    this.onLocalAudioChanged(this.localAudioStream);
+  }
+
+  private teardownAudioMix() {
+    this.micSourceNode?.disconnect();
+    this.micGainNode?.disconnect();
+    this.screenSourceNode?.disconnect();
+    this.screenGainNode?.disconnect();
+    this.micSourceNode = null;
+    this.micGainNode = null;
+    this.screenSourceNode = null;
+    this.screenGainNode = null;
+    if (this.mixContext) {
+      void this.mixContext.close().catch(() => undefined);
+    }
+    this.mixContext = null;
+    this.mixDestination = null;
+  }
+
+  private hasLiveScreenAudio() {
+    return Boolean(this.localScreenStream?.getAudioTracks().some((track) => track.readyState === "live"));
+  }
+
+  private updateMixGains() {
+    if (this.micGainNode) {
+      this.micGainNode.gain.value = this.micEnabled ? 1 : 0;
+    }
+    if (this.screenGainNode) {
+      this.screenGainNode.gain.value = this.screenAudioEnabled ? 1 : 0;
+    }
+    this.localAudioStream?.getAudioTracks().forEach((track) => {
+      track.enabled = this.micEnabled || this.screenAudioEnabled;
+    });
+  }
+
+  private async rebuildOutboundAudio() {
+    this.ensureAudioMix();
+    if (!this.mixContext || !this.mixDestination) {
+      return;
+    }
+    if (this.mixContext.state === "suspended") {
+      await this.mixContext.resume().catch(() => undefined);
+    }
+
+    this.micSourceNode?.disconnect();
+    this.micGainNode?.disconnect();
+    this.screenSourceNode?.disconnect();
+    this.screenGainNode?.disconnect();
+    this.micSourceNode = null;
+    this.micGainNode = null;
+    this.screenSourceNode = null;
+    this.screenGainNode = null;
+
+    const micTrack = this.localMicStream?.getAudioTracks()[0] || null;
+    if (micTrack) {
+      micTrack.enabled = true;
+      this.micSourceNode = this.mixContext.createMediaStreamSource(new MediaStream([micTrack]));
+      this.micGainNode = this.mixContext.createGain();
+      this.micSourceNode.connect(this.micGainNode);
+      this.micGainNode.connect(this.mixDestination);
+    }
+
+    const screenTrack = this.localScreenStream?.getAudioTracks()[0] || null;
+    this.screenAudioEnabled = Boolean(screenTrack && screenTrack.readyState === "live");
+    if (screenTrack) {
+      this.screenSourceNode = this.mixContext.createMediaStreamSource(new MediaStream([screenTrack]));
+      this.screenGainNode = this.mixContext.createGain();
+      this.screenSourceNode.connect(this.screenGainNode);
+      this.screenGainNode.connect(this.mixDestination);
+    }
+
+    this.updateMixGains();
+    this.onLocalAudioChanged(this.localAudioStream);
+  }
+
+  private async syncLocalAudioState() {
+    if (!this.localMicStream && !this.localAudioStream) {
+      return;
+    }
+    await this.rebuildOutboundAudio();
+    this.updateMixGains();
+  }
+
   // ensurePeer 确保与目标用户的 RTCPeerConnection 存在，并按需绑定本地轨道。
   private async ensurePeer(user: User, initialOfferOwner: boolean, relayOnly = false) {
     const existing = this.peers.get(user.id);
@@ -575,19 +717,42 @@ export class RTCController {
       if (relayOnly && !existing.useRelayOnly) {
         this.destroyPeer(user.id);
       } else {
-      if (["failed", "closed"].includes(existing.pc.connectionState)) {
-        this.destroyPeer(user.id);
-      } else {
-        this.clearPeerReconnect(existing);
-        if (initialOfferOwner) {
-          existing.initialOfferOwner = true;
-          await this.bindLocalTracks(existing, true);
+        if (["failed", "closed"].includes(existing.pc.connectionState)) {
+          this.destroyPeer(user.id);
+        } else {
+          this.clearPeerReconnect(existing);
+          if (initialOfferOwner) {
+            existing.initialOfferOwner = true;
+            await this.bindLocalTracks(existing, true);
+          }
+          return existing;
         }
-        return existing;
-      }
       }
     }
 
+    const pending = this.peerEnsurePromises.get(user.id);
+    if (pending) {
+      const ensured = await pending;
+      if (initialOfferOwner && !ensured.initialOfferOwner) {
+        ensured.initialOfferOwner = true;
+        await this.bindLocalTracks(ensured, true);
+        await this.sendOffer(ensured);
+      }
+      return ensured;
+    }
+
+    const createPromise = this.createPeer(user, initialOfferOwner, relayOnly);
+    this.peerEnsurePromises.set(user.id, createPromise);
+    try {
+      return await createPromise;
+    } finally {
+      if (this.peerEnsurePromises.get(user.id) === createPromise) {
+        this.peerEnsurePromises.delete(user.id);
+      }
+    }
+  }
+
+  private async createPeer(user: User, initialOfferOwner: boolean, relayOnly: boolean) {
     const currentUser = this.getCurrentUser();
     if (!currentUser) {
       throw new Error("missing current user");
@@ -620,18 +785,29 @@ export class RTCController {
       reconnectTimer: null,
       reconnecting: false,
       useRelayOnly: relayOnly,
+      lastKnownTransport: relayOnly ? "turn" : "unknown",
       statsTimer: null,
+      stableTimer: null,
     };
 
-    pc.addEventListener("negotiationneeded", () => {
-      if (!wrapper.initialOfferOwner && !wrapper.hasBoundLocalTracks) {
+    pc.addEventListener("icecandidate", (event) => {
+      if (!event.candidate) {
+        this.log("ice:gathering-complete", {
+          userId: user.id,
+          relayOnly,
+          iceGatheringState: pc.iceGatheringState,
+        });
+        window.setTimeout(() => {
+          void this.evaluatePeerConnectivity(user.id, "ice-no-usable-candidate");
+        }, RTCController.ICE_GATHERING_EVAL_DELAY_MS);
         return;
       }
-      void this.sendOffer(wrapper);
-    });
-
-    pc.addEventListener("icecandidate", (event) => {
-      if (!event.candidate) return;
+      this.log("ice:candidate", {
+        userId: user.id,
+        relayOnly,
+        type: event.candidate.type || "unknown",
+        protocol: event.candidate.protocol || "unknown",
+      });
       this.socket.send("rtc.ice_candidate", {
         channelId: this.getCurrentVoiceChannelId(),
         targetUserId: user.id,
@@ -695,35 +871,49 @@ export class RTCController {
 
     pc.addEventListener("iceconnectionstatechange", () => {
       if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
-        this.clearPeerReconnect(wrapper);
+        this.clearPeerReconnect(wrapper, false);
         this.clearPeerDisconnectTimer(user.id);
+        this.scheduleStableReset(wrapper);
         this.startPeerStats(wrapper);
         return;
       }
       if (pc.iceConnectionState === "disconnected") {
-        this.schedulePeerReconnect(user.id, RTCController.PEER_RECONNECT_DELAY_MS, "ice-disconnected");
+        this.cancelStableReset(wrapper);
+        this.schedulePeerReconnect(
+          user.id,
+          wrapper.useRelayOnly || wrapper.lastKnownTransport === "turn" ? RTCController.TURN_DISCONNECT_GRACE_MS : RTCController.PEER_RECONNECT_DELAY_MS,
+          "ice-disconnected",
+        );
         return;
       }
       if (pc.iceConnectionState === "failed") {
+        this.cancelStableReset(wrapper);
         this.schedulePeerReconnect(user.id, 0, "ice-failed");
       }
     });
 
     pc.addEventListener("connectionstatechange", () => {
       if (pc.connectionState === "connected") {
-        this.clearPeerReconnect(wrapper);
+        this.clearPeerReconnect(wrapper, false);
         this.clearPeerDisconnectTimer(user.id);
+        this.scheduleStableReset(wrapper);
         this.startPeerStats(wrapper);
         return;
       }
       if (pc.connectionState === "disconnected") {
+        this.cancelStableReset(wrapper);
         this.schedulePeerDisconnectCleanup(user.id);
         this.ensureMediaFlow(user.id, "audio", "peer-disconnected");
         this.ensureMediaFlow(user.id, "screen", "peer-disconnected");
-        this.schedulePeerReconnect(user.id, RTCController.PEER_RECONNECT_DELAY_MS, "peer-disconnected");
+        this.schedulePeerReconnect(
+          user.id,
+          wrapper.useRelayOnly || wrapper.lastKnownTransport === "turn" ? RTCController.TURN_DISCONNECT_GRACE_MS : RTCController.PEER_RECONNECT_DELAY_MS,
+          "peer-disconnected",
+        );
         return;
       }
       if (pc.connectionState === "failed") {
+        this.cancelStableReset(wrapper);
         this.schedulePeerReconnect(user.id, 0, "peer-failed");
         return;
       }
@@ -735,6 +925,7 @@ export class RTCController {
     this.peers.set(user.id, wrapper);
     if (initialOfferOwner) {
       await this.bindLocalTracks(wrapper, true);
+      await this.sendOffer(wrapper);
     }
     this.log("peer:created", { userId: user.id, shouldOffer: initialOfferOwner });
     return wrapper;
@@ -742,14 +933,13 @@ export class RTCController {
 
   private async bindLocalTracks(wrapper: PeerWrapper, includeLocalTracks: boolean) {
     const [audioTrack] = includeLocalTracks ? this.localAudioStream?.getAudioTracks() || [] : [];
-    const [displayAudioTrack] = includeLocalTracks ? this.localScreenStream?.getAudioTracks() || [] : [];
     const [screenTrack] = includeLocalTracks ? this.localScreenStream?.getVideoTracks() || [] : [];
 
     await wrapper.audioTransceiver.sender.replaceTrack(audioTrack || null);
     wrapper.audioTransceiver.direction = audioTrack ? "sendrecv" : "recvonly";
 
-    await wrapper.displayAudioTransceiver.sender.replaceTrack(displayAudioTrack || null);
-    wrapper.displayAudioTransceiver.direction = displayAudioTrack ? "sendrecv" : "recvonly";
+    await wrapper.displayAudioTransceiver.sender.replaceTrack(null);
+    wrapper.displayAudioTransceiver.direction = "recvonly";
 
     await wrapper.screenTransceiver.sender.replaceTrack(screenTrack || null);
     wrapper.screenTransceiver.direction = screenTrack ? "sendrecv" : "recvonly";
@@ -761,6 +951,9 @@ export class RTCController {
     await Promise.all(
       Array.from(this.peers.values()).map(async (wrapper) => {
         await this.bindLocalTracks(wrapper, true);
+        if (wrapper.initialOfferOwner) {
+          await this.sendOffer(wrapper);
+        }
       }),
     );
   }
@@ -838,6 +1031,7 @@ export class RTCController {
   }
 
   handleScreenState(userId: number, screenSharing: boolean) {
+    if (!this.voiceSessionActive) return;
     if (!screenSharing) {
       this.clearMediaReconnect(userId, "screen");
       return;
@@ -846,6 +1040,7 @@ export class RTCController {
   }
 
   handleVoiceState(userId: number, micEnabled: boolean) {
+    if (!this.voiceSessionActive) return;
     if (!micEnabled) {
       this.clearMediaReconnect(userId, "audio");
       return;
@@ -854,6 +1049,7 @@ export class RTCController {
   }
 
   private ensureMediaFlow(userId: number, kind: MediaSyncKind, reason: string) {
+    if (!this.voiceSessionActive) return;
     if (!this.getCurrentVoiceChannelId()) return;
     if (userId === this.getCurrentUser()?.id) return;
     const voiceMember = this.getVoiceMembers().get(userId);
@@ -940,16 +1136,41 @@ export class RTCController {
     return `${userId}:${kind}`;
   }
 
-  private clearPeerReconnect(wrapper: PeerWrapper) {
+  private clearPeerReconnect(wrapper: PeerWrapper, resetAttempts = true) {
     if (wrapper.reconnectTimer) {
       window.clearTimeout(wrapper.reconnectTimer);
       wrapper.reconnectTimer = null;
     }
-    wrapper.reconnectAttempts = 0;
+    if (resetAttempts) {
+      wrapper.reconnectAttempts = 0;
+    }
     wrapper.reconnecting = false;
   }
 
+  private scheduleStableReset(wrapper: PeerWrapper) {
+    this.cancelStableReset(wrapper);
+    wrapper.stableTimer = window.setTimeout(() => {
+      wrapper.stableTimer = null;
+      if (
+        wrapper.pc.connectionState === "connected" ||
+        wrapper.pc.iceConnectionState === "connected" ||
+        wrapper.pc.iceConnectionState === "completed"
+      ) {
+        wrapper.reconnectAttempts = 0;
+      }
+    }, RTCController.PEER_STABLE_RESET_MS);
+  }
+
+  private cancelStableReset(wrapper: PeerWrapper) {
+    if (!wrapper.stableTimer) return;
+    window.clearTimeout(wrapper.stableTimer);
+    wrapper.stableTimer = null;
+  }
+
   private schedulePeerReconnect(userId: number, delayMs: number, reason: string) {
+    if (!this.voiceSessionActive) {
+      return;
+    }
     const wrapper = this.peers.get(userId);
     if (!wrapper || wrapper.reconnecting) {
       return;
@@ -958,7 +1179,10 @@ export class RTCController {
       return;
     }
     const nextAttempt = wrapper.reconnectAttempts + 1;
-    const turnFallback = nextAttempt > 2 && this.getRelayIceServers().length > 0;
+    const turnFallback =
+      wrapper.useRelayOnly ||
+      wrapper.lastKnownTransport === "turn" ||
+      (nextAttempt >= 2 && this.getRelayIceServers().length > 0);
     wrapper.reconnectTimer = window.setTimeout(() => {
       wrapper.reconnectTimer = null;
       void this.attemptPeerReconnect(userId, reason);
@@ -968,12 +1192,15 @@ export class RTCController {
       "info",
       "实时连接重连中",
       turnFallback
-        ? `与 ${wrapper.user.displayName} 的连接不稳定，正在切换 TURN 中继重连`
+        ? `与 ${wrapper.user.displayName} 的连接不稳定，正在使用 TURN 中继重连`
         : `与 ${wrapper.user.displayName} 的连接出现波动，正在自动重连`,
     );
   }
 
   private async attemptPeerReconnect(userId: number, reason: string) {
+    if (!this.voiceSessionActive) {
+      return;
+    }
     const wrapper = this.peers.get(userId);
     if (!wrapper || !this.getCurrentVoiceChannelId()) {
       return;
@@ -985,12 +1212,14 @@ export class RTCController {
     wrapper.reconnectAttempts += 1;
     wrapper.reconnecting = true;
     const attempt = wrapper.reconnectAttempts;
-    const shouldUseRelayOnly = attempt > 2 && this.getRelayIceServers().length > 0;
+    const switchingToRelay =
+      !wrapper.useRelayOnly && wrapper.lastKnownTransport !== "turn" &&
+      (attempt >= 2 && this.getRelayIceServers().length > 0);
+    const isTurnConnection = wrapper.useRelayOnly || wrapper.lastKnownTransport === "turn";
 
     try {
       if (
-        !shouldUseRelayOnly &&
-        attempt < RTCController.PEER_RECONNECT_MAX_ATTEMPTS &&
+        !switchingToRelay &&
         wrapper.pc.signalingState === "stable" &&
         !wrapper.makingOffer
       ) {
@@ -1001,17 +1230,20 @@ export class RTCController {
           targetUserId: wrapper.user.id,
           sdp: wrapper.pc.localDescription?.sdp,
         });
-        this.log("reconnect:ice-restart", { userId: wrapper.user.id, attempt, reason });
+        this.log("reconnect:ice-restart", { userId: wrapper.user.id, attempt, reason, relayOnly: wrapper.useRelayOnly });
         wrapper.reconnecting = false;
-        this.schedulePeerReconnect(userId, RTCController.PEER_RECONNECT_DELAY_MS, "ice-restart-timeout");
+        const timeout = isTurnConnection ? RTCController.ICE_RESTART_TIMEOUT_MS : RTCController.PEER_RECONNECT_DELAY_MS;
+        this.schedulePeerReconnect(userId, timeout, "ice-restart-timeout");
         return;
       }
 
+      const shouldUseRelayOnly = switchingToRelay || wrapper.useRelayOnly || wrapper.lastKnownTransport === "turn";
       await this.recreatePeer(userId, reason, true, shouldUseRelayOnly);
     } catch (error) {
       console.error(error);
       wrapper.reconnecting = false;
       if (attempt >= RTCController.PEER_RECONNECT_MAX_ATTEMPTS) {
+        const shouldUseRelayOnly = wrapper.useRelayOnly || wrapper.lastKnownTransport === "turn";
         await this.recreatePeer(userId, "reconnect-max-attempts", true, shouldUseRelayOnly);
         return;
       }
@@ -1020,6 +1252,9 @@ export class RTCController {
   }
 
   private async recreatePeer(userId: number, reason: string, notifyRemote: boolean, relayOnly = false) {
+    if (!this.voiceSessionActive) {
+      return;
+    }
     const wrapper = this.peers.get(userId);
     const user = wrapper?.user || this.lookupUser(userId);
     const currentUser = this.getCurrentUser();
@@ -1035,6 +1270,7 @@ export class RTCController {
         channelId: this.getCurrentVoiceChannelId(),
         targetUserId: userId,
         reason,
+        relayOnly,
       });
     }
 
@@ -1045,18 +1281,21 @@ export class RTCController {
     const nextWrapper = await this.ensurePeer(user, shouldOffer, relayOnly);
     await this.bindLocalTracks(nextWrapper, true);
     nextWrapper.reconnecting = false;
-    nextWrapper.reconnectAttempts = 0;
+    nextWrapper.reconnectAttempts = relayOnly ? 1 : 0;
+    nextWrapper.lastKnownTransport = relayOnly ? "turn" : nextWrapper.lastKnownTransport;
     if (shouldOffer) {
       await this.sendOffer(nextWrapper);
     }
   }
 
   private destroyPeer(userId: number) {
+    this.peerEnsurePromises.delete(userId);
     const wrapper = this.peers.get(userId);
     if (!wrapper) {
       return;
     }
     this.clearPeerReconnect(wrapper);
+    this.cancelStableReset(wrapper);
     this.clearPeerDisconnectTimer(userId);
     this.clearMediaReconnect(userId, "audio");
     this.clearMediaReconnect(userId, "screen");
@@ -1128,7 +1367,12 @@ export class RTCController {
       const pair = selectedPair as RTCIceCandidatePairStats | null;
       const localCandidate = pair?.localCandidateId ? (reports.get(pair.localCandidateId) as RTCStats | undefined) : undefined;
       const remoteCandidate = pair?.remoteCandidateId ? (reports.get(pair.remoteCandidateId) as RTCStats | undefined) : undefined;
+      const localCandidateType = (localCandidate as RTCStats & { candidateType?: string } | undefined)?.candidateType || null;
+      const remoteCandidateType = (remoteCandidate as RTCStats & { candidateType?: string } | undefined)?.candidateType || null;
       const transport = this.resolveTransportType(localCandidate, remoteCandidate);
+      if (transport !== "unknown") {
+        wrapper.lastKnownTransport = transport;
+      }
       const latencyMs =
         typeof pair?.currentRoundTripTime === "number"
           ? Math.round(pair.currentRoundTripTime * 1000)
@@ -1136,13 +1380,84 @@ export class RTCController {
             ? Math.round((pair.totalRoundTripTime / pair.responsesReceived) * 1000)
             : null;
 
+      this.log("ice:selected-pair", {
+        userId: wrapper.user.id,
+        relayOnly: wrapper.useRelayOnly,
+        pairState: pair?.state || null,
+        nominated: pair?.nominated ?? null,
+        writable: (pair as RTCIceCandidatePairStats & { writable?: boolean } | null)?.writable ?? null,
+        localCandidateType,
+        remoteCandidateType,
+        localCandidateId: pair?.localCandidateId || null,
+        remoteCandidateId: pair?.remoteCandidateId || null,
+        transport,
+        latencyMs,
+      });
+
       this.diagnostics.set(wrapper.user.id, {
         userId: wrapper.user.id,
         latencyMs,
         transport,
+        retryCount: wrapper.reconnectAttempts,
+        recoveryMode: wrapper.useRelayOnly ? "relay" : wrapper.reconnectAttempts > 0 ? "ice-restart" : "stable",
         updatedAt: Date.now(),
       });
       this.onDiagnosticsChanged(new Map(this.diagnostics));
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  private describeIceServers(servers: RTCIceServer[]) {
+    return servers.map((server) => ({
+      urls: Array.isArray(server.urls) ? server.urls : [server.urls],
+      username: server.username || null,
+      hasCredential: Boolean(server.credential),
+    }));
+  }
+
+  private async evaluatePeerConnectivity(userId: number, reason: string) {
+    if (!this.voiceSessionActive) {
+      return;
+    }
+    const wrapper = this.peers.get(userId);
+    if (!wrapper || wrapper.reconnecting || wrapper.reconnectTimer) {
+      return;
+    }
+    if (!this.getCurrentVoiceChannelId()) {
+      return;
+    }
+    if (
+      wrapper.pc.connectionState === "connected" ||
+      wrapper.pc.iceConnectionState === "connected" ||
+      wrapper.pc.iceConnectionState === "completed"
+    ) {
+      return;
+    }
+
+    try {
+      const stats = await wrapper.pc.getStats();
+      let hasUsablePair = false;
+      stats.forEach((report) => {
+        if (
+          report.type === "candidate-pair" &&
+          (((report as RTCIceCandidatePairStats).state === "succeeded") ||
+            (report as RTCIceCandidatePairStats).nominated)
+        ) {
+          hasUsablePair = true;
+        }
+      });
+      if (hasUsablePair) {
+        return;
+      }
+      this.log("ice:no-usable-pair", {
+        userId,
+        relayOnly: wrapper.useRelayOnly,
+        connectionState: wrapper.pc.connectionState,
+        iceConnectionState: wrapper.pc.iceConnectionState,
+        reason,
+      });
+      this.schedulePeerReconnect(userId, 0, reason);
     } catch (error) {
       console.error(error);
     }

@@ -62,6 +62,7 @@ button {
 .main-panel,
 .member-sidebar {
   border-right: 1px solid var(--line);
+  min-height: 0;
 }
 
 .server-rail {
@@ -121,6 +122,66 @@ button {
   padding: 22px 18px;
   background: rgba(11, 17, 26, 0.94);
   overflow: hidden;
+  min-height: 0;
+}
+
+.member-sidebar {
+  height: 100%;
+  overflow: hidden;
+}
+
+.mobile-domain-strip {
+  display: none;
+  margin-bottom: 14px;
+}
+
+.mobile-domain-strip__scroll {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.mobile-domain-chip {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px 14px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+}
+
+.mobile-domain-chip--active {
+  background: linear-gradient(135deg, rgba(109, 226, 210, 0.18), rgba(251, 180, 91, 0.22));
+  box-shadow: inset 0 0 0 1px rgba(109, 226, 210, 0.36);
+}
+
+.mobile-domain-chip--create {
+  color: var(--teal);
+}
+
+.mobile-domain-chip__avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.08);
+  font-weight: 800;
+  color: var(--text);
+}
+
+.mobile-domain-chip__name {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.92rem;
+  font-weight: 700;
 }
 
 .domain-card,
@@ -838,7 +899,6 @@ button {
 
 .chat-panel--screening .message-list {
   min-height: 180px;
-  height: 100%;
   overflow: auto;
 }
 
@@ -942,7 +1002,8 @@ button {
 
 .member-list {
   flex: 1;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -1025,6 +1086,7 @@ body {
 .main-panel,
 .member-sidebar {
   border-right: 1px solid #232323;
+  min-height: 0;
 }
 
 .server-rail {
@@ -1980,6 +2042,9 @@ body {
 
 .member-list {
   gap: 10px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
 }
 
 .member-section {
@@ -2360,6 +2425,9 @@ body {
 @media (max-width: 960px) {
   .app-shell {
     grid-template-columns: 1fr;
+    width: 100%;
+    max-width: 100%;
+    overflow-x: hidden;
   }
 
   .server-rail,
@@ -2370,6 +2438,54 @@ body {
   .channel-sidebar {
     border-right: none;
     border-bottom: 1px solid var(--line);
+    width: 100%;
+    min-width: 0;
+    padding: 16px 14px 12px;
+    overflow: visible;
+  }
+
+  .main-panel {
+    width: 100%;
+    min-width: 0;
+    padding: 14px;
+    overflow-x: hidden;
+  }
+
+  .domain-card,
+  .chat-panel,
+  .voice-presence-dock,
+  .screening-panel,
+  .member-section {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .mobile-domain-strip {
+    display: block;
+  }
+
+  .sidebar-topbar,
+  .domain-card__header,
+  .top-utility-bar,
+  .top-utility-bar__left,
+  .top-utility-bar__right,
+  .voice-presence-dock__actions,
+  .chat-panel__title,
+  .chat-panel__icons {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .top-utility-bar,
+  .top-utility-bar__left,
+  .top-utility-bar__right,
+  .voice-presence-dock__actions {
+    flex-wrap: wrap;
+  }
+
+  .search-box {
+    width: 100%;
+    min-width: 0;
   }
 
   .section-title-row,
@@ -2384,13 +2500,73 @@ body {
     grid-template-columns: 1fr;
   }
 
+  .composer__box {
+    grid-template-columns: 1fr;
+  }
+
+  .composer__actions {
+    width: 100%;
+    justify-content: space-between;
+    flex-wrap: wrap;
+  }
+
   .voice-orb--sharing {
-    min-width: 196px;
+    min-width: 0;
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .voice-orb,
+  .voice-orb strong {
+    max-width: 100%;
+  }
+
+  .voice-presence-dock__avatars {
+    gap: 14px;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .voice-orb__avatar--sharing,
+  .voice-orb__screen {
+    width: 100%;
+    max-width: 100%;
   }
 
   .voice-orb__avatar--sharing {
-    width: 184px;
-    height: 104px;
+    height: auto;
+    aspect-ratio: 16 / 9;
+  }
+
+  .screening-composer,
+  .screening-composer__inputs {
+    grid-template-columns: 1fr;
+  }
+
+  .screening-composer__actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .screening-composer__actions .action-pill {
+    flex: 1 1 140px;
+    justify-content: center;
+  }
+
+  .screening-stage__video-wrap {
+    max-height: none;
+  }
+
+  .chat-panel__title h3 {
+    font-size: 1.25rem;
+  }
+
+  .voice-presence-dock__heading {
+    font-size: 1.2rem;
+  }
+
+  .voice-presence-dock__heading strong {
+    font-size: 1.1rem;
   }
 
   body {
