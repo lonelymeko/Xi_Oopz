@@ -182,6 +182,7 @@ export class RTCController {
   async toggleMic(enabled: boolean) {
     this.micEnabled = enabled;
     await this.syncLocalAudioState();
+    await this.refreshLocalTracksOnPeers();
   }
 
   async setAudioInputDevice(deviceId: string) {
@@ -969,13 +970,11 @@ export class RTCController {
     await this.syncLocalAudioState();
     const [audioTrack] = this.localAudioStream?.getAudioTracks() || [];
     if (audioTrack) {
-      await wrapper.audioTransceiver.sender.replaceTrack(null);
       await wrapper.audioTransceiver.sender.replaceTrack(audioTrack);
       wrapper.audioTransceiver.direction = "sendrecv";
     }
     const [screenTrack] = this.localScreenStream?.getVideoTracks() || [];
     if (screenTrack) {
-      await wrapper.screenTransceiver.sender.replaceTrack(null);
       await wrapper.screenTransceiver.sender.replaceTrack(screenTrack);
       wrapper.screenTransceiver.direction = "sendrecv";
     }
@@ -989,6 +988,14 @@ export class RTCController {
         screenSharing: true,
       });
     }
+  }
+
+  private async refreshLocalTracksOnPeers() {
+    await Promise.all(
+      Array.from(this.peers.values()).map(async (wrapper) => {
+        await this.bindLocalTracks(wrapper, true);
+      }),
+    );
   }
 
   private async applyLocalTracksToAllPeers() {
