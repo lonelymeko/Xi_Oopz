@@ -967,7 +967,11 @@ export class RTCController {
     if (!this.voiceSessionActive || !this.getCurrentVoiceChannelId()) {
       return;
     }
-    await this.syncLocalAudioState();
+    if ((this.micEnabled || this.screenAudioEnabled) && this.localAudioStream?.getAudioTracks().length) {
+      await this.pulseMicAfterReconnect();
+    } else {
+      await this.syncLocalAudioState();
+    }
     const [audioTrack] = this.localAudioStream?.getAudioTracks() || [];
     if (audioTrack) {
       await wrapper.audioTransceiver.sender.replaceTrack(audioTrack);
@@ -988,6 +992,18 @@ export class RTCController {
         screenSharing: true,
       });
     }
+  }
+
+  private async pulseMicAfterReconnect() {
+    const restoreMicEnabled = this.micEnabled;
+    await this.toggleMic(false);
+    await new Promise<void>((resolve) => {
+      window.setTimeout(resolve, 80);
+    });
+    if (!this.voiceSessionActive) {
+      return;
+    }
+    await this.toggleMic(restoreMicEnabled);
   }
 
   private async refreshLocalTracksOnPeers() {
