@@ -167,6 +167,17 @@ body {
   font-weight: 800;
 }
 
+.profile-chip__version {
+  position: absolute;
+  left: -30px;
+  top: 17px;
+  min-width: 24px;
+  text-align: right;
+  color: #8b949e;
+  font-size: 11px;
+  font-weight: 800;
+}
+
 .profile-chip__dot {
   position: absolute;
   right: 2px;

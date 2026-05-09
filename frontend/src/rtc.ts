@@ -21,7 +21,7 @@ type PeerWrapper = {
   lastKnownTransport: PeerConnectionDiagnostics["transport"];
   statsTimer: number | null;
   stableTimer: number | null;
-  lastRecoveryTrackRefreshAt: number;
+  outboundRehydrateTimers: number[];
 };
 
 type SignalPayload = {
@@ -88,6 +88,7 @@ export class RTCController {
   private static readonly PEER_STATS_INTERVAL_MS = 3000;
   private static readonly ICE_GATHERING_EVAL_DELAY_MS = 800;
   private static readonly PEER_STABLE_RESET_MS = 8000;
+  private static readonly OUTBOUND_REHYDRATE_DELAYS_MS = [300, 1200];
 
   private localAudioStream: MediaStream | null = null;
   private localMicStream: MediaStream | null = null;
@@ -376,7 +377,7 @@ export class RTCController {
         if (requestedKind === "screen" && !this.localScreenStream) {
           return;
         }
-        await this.bindLocalTracks(wrapper, true);
+        await this.refreshLocalOutboundForNegotiation(wrapper);
         await this.sendOffer(wrapper);
         return;
       }
@@ -395,7 +396,7 @@ export class RTCController {
 
         wrapper.isSettingRemoteAnswerPending = false;
         await wrapper.pc.setRemoteDescription({ type: "offer", sdp: payload.sdp });
-        await this.bindLocalTracks(wrapper, true);
+        await this.refreshLocalOutboundForNegotiation(wrapper);
         await this.flushPendingIceCandidates(wrapper);
         await wrapper.pc.setLocalDescription();
         this.socket.send("rtc.answer", {
@@ -705,11 +706,91 @@ export class RTCController {
   }
 
   private async syncLocalAudioState() {
-    if (!this.localMicStream && !this.localAudioStream) {
+    const hasMic = Boolean(this.localMicStream?.getAudioTracks().some((track) => track.readyState === "live"));
+    const hasMixedAudio = Boolean(this.localAudioStream?.getAudioTracks().some((track) => track.readyState === "live"));
+    const hasScreenAudio = this.hasLiveScreenAudio();
+
+    // 屏幕共享音频也是“本端正在发送的音频源”。之前这里只看麦克风和混音流，
+    // 在“关麦但共享屏幕声音”的场景下，TURN 重连后的协商路径可能直接跳过
+    // rebuildOutboundAudio()，导致对端连接恢复但收不到本端音频。
+    if (!hasMic && !hasMixedAudio && !hasScreenAudio) {
       return;
     }
     await this.rebuildOutboundAudio();
     this.updateMixGains();
+  }
+
+  private async refreshLocalOutboundForNegotiation(wrapper: PeerWrapper) {
+    // TURN 断线后重建 PeerConnection 时，ICE/DTLS 可能已经恢复，但 RTCRtpSender
+    // 仍然持有断线前的旧 audio track，表现为“连接成功但单向无声”。用户手动关麦再开麦
+    // 能恢复，就是因为 toggleMic 会重建 outbound audio 并 replaceTrack。这里在
+    // offer/answer/recreate 前主动执行同等刷新，只刷新当前状态下应该发送的麦克风或
+    // 屏幕共享音频，不改变用户的开麦/静音选择。
+    await this.syncLocalAudioState();
+    await this.bindLocalTracks(wrapper, true);
+  }
+
+  private async forceRefreshLocalOutboundAfterReconnect(wrapper: PeerWrapper, reason: string, renegotiate: boolean) {
+    if (!this.voiceSessionActive || !this.peers.has(wrapper.user.id)) {
+      return;
+    }
+
+    // TURN/ICE 重连后的强制发送端修复。
+    //
+    // 线上现象是：第二次重连后 PeerConnection 已经 connected，但电脑仍听不到手机；
+    // 手机手动关麦再开麦后恢复。这个行为说明频道状态和信令不是根因，真正恢复声音的是
+    // toggleMic 触发的 rebuildOutboundAudio + replaceTrack。重连流程里如果只在 offer/answer
+    // 前刷新一次，时机可能早于浏览器底层 sender 重新可用，第二次 TURN 重连仍会留下
+    // “sender.track 看起来存在，但 RTP 实际不发包”的状态。
+    //
+    // 因此 connected 后再延迟执行 force replace：先 replaceTrack(null)，再挂回当前最新的
+    // 麦克风/屏幕共享混音轨和屏幕视频轨，强制浏览器重建发送管线。这里不调用 toggleMic，
+    // 不改变用户静音状态；屏幕共享音频也通过 syncLocalAudioState() 纳入混音轨。
+    await this.syncLocalAudioState();
+    await this.bindLocalTracks(wrapper, true, { forceReplace: true });
+
+    const channelId = this.getCurrentVoiceChannelId();
+    if (channelId) {
+      this.socket.send("voice.state", {
+        channelId,
+        micEnabled: this.micEnabled,
+      });
+      if (this.localScreenStream) {
+        this.socket.send("screen.state", {
+          channelId,
+          screenSharing: true,
+        });
+      }
+    }
+
+    if (renegotiate && wrapper.initialOfferOwner && wrapper.pc.signalingState === "stable") {
+      this.log("reconnect:outbound-rehydrate", { userId: wrapper.user.id, reason });
+      await this.sendOffer(wrapper);
+    }
+  }
+
+  private scheduleOutboundRehydrateAfterReconnect(wrapper: PeerWrapper, source: string) {
+    if (!this.voiceSessionActive || !this.peers.has(wrapper.user.id)) {
+      return;
+    }
+
+    // connectionState 和 iceConnectionState 在同一次恢复里可能连续触发。
+    // 同一个 peer 只保留最新一轮延迟刷新，避免多轮 replaceTrack / offer 互相打架。
+    this.clearOutboundRehydrateTimers(wrapper);
+    wrapper.outboundRehydrateTimers = RTCController.OUTBOUND_REHYDRATE_DELAYS_MS.map((delayMs, index) =>
+      window.setTimeout(() => {
+        void this.forceRefreshLocalOutboundAfterReconnect(
+          wrapper,
+          `${source}-${delayMs}`,
+          index === RTCController.OUTBOUND_REHYDRATE_DELAYS_MS.length - 1,
+        );
+      }, delayMs),
+    );
+  }
+
+  private clearOutboundRehydrateTimers(wrapper: PeerWrapper) {
+    wrapper.outboundRehydrateTimers.forEach((timer) => window.clearTimeout(timer));
+    wrapper.outboundRehydrateTimers = [];
   }
 
   // ensurePeer 确保与目标用户的 RTCPeerConnection 存在，并按需绑定本地轨道。
@@ -725,7 +806,7 @@ export class RTCController {
           this.clearPeerReconnect(existing);
           if (initialOfferOwner) {
             existing.initialOfferOwner = true;
-            await this.bindLocalTracks(existing, true);
+            await this.refreshLocalOutboundForNegotiation(existing);
           }
           return existing;
         }
@@ -737,7 +818,7 @@ export class RTCController {
       const ensured = await pending;
       if (initialOfferOwner && !ensured.initialOfferOwner) {
         ensured.initialOfferOwner = true;
-        await this.bindLocalTracks(ensured, true);
+        await this.refreshLocalOutboundForNegotiation(ensured);
         await this.sendOffer(ensured);
       }
       return ensured;
@@ -790,7 +871,7 @@ export class RTCController {
       lastKnownTransport: relayOnly ? "turn" : "unknown",
       statsTimer: null,
       stableTimer: null,
-      lastRecoveryTrackRefreshAt: 0,
+      outboundRehydrateTimers: [],
     };
 
     pc.addEventListener("icecandidate", (event) => {
@@ -875,6 +956,7 @@ export class RTCController {
     pc.addEventListener("iceconnectionstatechange", () => {
       if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
         void this.handlePeerConnected(wrapper);
+        this.scheduleOutboundRehydrateAfterReconnect(wrapper, `ice-${pc.iceConnectionState}`);
         return;
       }
       if (pc.iceConnectionState === "disconnected") {
@@ -895,6 +977,7 @@ export class RTCController {
     pc.addEventListener("connectionstatechange", () => {
       if (pc.connectionState === "connected") {
         void this.handlePeerConnected(wrapper);
+        this.scheduleOutboundRehydrateAfterReconnect(wrapper, "connection-connected");
         return;
       }
       if (pc.connectionState === "disconnected") {
@@ -921,16 +1004,22 @@ export class RTCController {
 
     this.peers.set(user.id, wrapper);
     if (initialOfferOwner) {
-      await this.bindLocalTracks(wrapper, true);
+      await this.refreshLocalOutboundForNegotiation(wrapper);
       await this.sendOffer(wrapper);
     }
     this.log("peer:created", { userId: user.id, shouldOffer: initialOfferOwner });
     return wrapper;
   }
 
-  private async bindLocalTracks(wrapper: PeerWrapper, includeLocalTracks: boolean) {
+  private async bindLocalTracks(wrapper: PeerWrapper, includeLocalTracks: boolean, options: { forceReplace?: boolean } = {}) {
     const [audioTrack] = includeLocalTracks ? this.localAudioStream?.getAudioTracks() || [] : [];
     const [screenTrack] = includeLocalTracks ? this.localScreenStream?.getVideoTracks() || [] : [];
+
+    if (options.forceReplace) {
+      await wrapper.audioTransceiver.sender.replaceTrack(null);
+      await wrapper.displayAudioTransceiver.sender.replaceTrack(null);
+      await wrapper.screenTransceiver.sender.replaceTrack(null);
+    }
 
     await wrapper.audioTransceiver.sender.replaceTrack(audioTrack || null);
     wrapper.audioTransceiver.direction = audioTrack ? "sendrecv" : "recvonly";
@@ -945,71 +1034,16 @@ export class RTCController {
   }
 
   private async handlePeerConnected(wrapper: PeerWrapper) {
-    const shouldRefreshTracks = wrapper.reconnectAttempts > 0 || wrapper.reconnecting;
     this.clearPeerReconnect(wrapper, false);
     this.clearPeerDisconnectTimer(wrapper.user.id);
     this.scheduleStableReset(wrapper);
     this.startPeerStats(wrapper);
-
-    if (!shouldRefreshTracks) {
-      return;
-    }
-
-    const now = Date.now();
-    if (now - wrapper.lastRecoveryTrackRefreshAt < 1000) {
-      return;
-    }
-    wrapper.lastRecoveryTrackRefreshAt = now;
-    await this.refreshOutboundMediaAfterReconnect(wrapper);
-  }
-
-  private async refreshOutboundMediaAfterReconnect(wrapper: PeerWrapper) {
-    if (!this.voiceSessionActive || !this.getCurrentVoiceChannelId()) {
-      return;
-    }
-    if ((this.micEnabled || this.screenAudioEnabled) && this.localAudioStream?.getAudioTracks().length) {
-      await this.pulseMicAfterReconnect();
-    } else {
-      await this.syncLocalAudioState();
-    }
-    const [audioTrack] = this.localAudioStream?.getAudioTracks() || [];
-    if (audioTrack) {
-      await wrapper.audioTransceiver.sender.replaceTrack(audioTrack);
-      wrapper.audioTransceiver.direction = "sendrecv";
-    }
-    const [screenTrack] = this.localScreenStream?.getVideoTracks() || [];
-    if (screenTrack) {
-      await wrapper.screenTransceiver.sender.replaceTrack(screenTrack);
-      wrapper.screenTransceiver.direction = "sendrecv";
-    }
-    this.socket.send("voice.state", {
-      channelId: this.getCurrentVoiceChannelId(),
-      micEnabled: this.micEnabled,
-    });
-    if (this.localScreenStream) {
-      this.socket.send("screen.state", {
-        channelId: this.getCurrentVoiceChannelId(),
-        screenSharing: true,
-      });
-    }
-  }
-
-  private async pulseMicAfterReconnect() {
-    const restoreMicEnabled = this.micEnabled;
-    await this.toggleMic(false);
-    await new Promise<void>((resolve) => {
-      window.setTimeout(resolve, 80);
-    });
-    if (!this.voiceSessionActive) {
-      return;
-    }
-    await this.toggleMic(restoreMicEnabled);
   }
 
   private async refreshLocalTracksOnPeers() {
     await Promise.all(
       Array.from(this.peers.values()).map(async (wrapper) => {
-        await this.bindLocalTracks(wrapper, true);
+        await this.refreshLocalOutboundForNegotiation(wrapper);
       }),
     );
   }
@@ -1017,7 +1051,7 @@ export class RTCController {
   private async applyLocalTracksToAllPeers() {
     await Promise.all(
       Array.from(this.peers.values()).map(async (wrapper) => {
-        await this.bindLocalTracks(wrapper, true);
+        await this.refreshLocalOutboundForNegotiation(wrapper);
         if (wrapper.initialOfferOwner) {
           await this.sendOffer(wrapper);
         }
@@ -1036,6 +1070,7 @@ export class RTCController {
     const startedAt = performance.now();
     try {
       wrapper.makingOffer = true;
+      await this.refreshLocalOutboundForNegotiation(wrapper);
       this.log("negotiate:start", { userId: wrapper.user.id });
       await pc.setLocalDescription();
       this.socket.send("rtc.offer", {
@@ -1080,6 +1115,7 @@ export class RTCController {
     }
     for (const wrapper of this.peers.values()) {
       this.clearPeerReconnect(wrapper);
+      this.clearOutboundRehydrateTimers(wrapper);
       wrapper.pc.close();
     }
     this.peers.clear();
@@ -1283,33 +1319,13 @@ export class RTCController {
       !wrapper.useRelayOnly && wrapper.lastKnownTransport !== "turn" &&
       (attempt >= 2 && this.getRelayIceServers().length > 0);
     const isTurnConnection = wrapper.useRelayOnly || wrapper.lastKnownTransport === "turn";
-    const currentUser = this.getCurrentUser();
-    const shouldInitiateRestart = currentUser != null && currentUser.id < wrapper.user.id;
 
     try {
-      if (
-        isTurnConnection &&
-        attempt === 1 &&
-        shouldInitiateRestart &&
-        wrapper.pc.signalingState === "stable" &&
-        !wrapper.makingOffer
-      ) {
-        const offer = await wrapper.pc.createOffer({ iceRestart: true });
-        await wrapper.pc.setLocalDescription(offer);
-        this.socket.send("rtc.offer", {
-          channelId: this.getCurrentVoiceChannelId(),
-          targetUserId: wrapper.user.id,
-          sdp: wrapper.pc.localDescription?.sdp,
-        });
-        this.log("reconnect:ice-restart", { userId: wrapper.user.id, attempt, reason, relayOnly: true });
-        wrapper.reconnecting = false;
-        this.schedulePeerReconnect(userId, RTCController.ICE_RESTART_TIMEOUT_MS, "turn-ice-restart-timeout");
-        return;
-      }
-
-      if (isTurnConnection && attempt === 1 && !shouldInitiateRestart) {
-        wrapper.reconnecting = false;
-        this.schedulePeerReconnect(userId, RTCController.ICE_RESTART_TIMEOUT_MS, "awaiting-remote-turn-restart");
+      if (isTurnConnection) {
+        // TURN/relay 断线后的单向音视频问题通常不是单纯 candidate 换路，而是旧 PeerConnection
+        // 内部的 receiver/transceiver 状态卡住；用户重进频道能恢复，说明可靠恢复点是重建整条 peer。
+        // 因此 relay 链路不再走 ICE restart/pulse/stats 叠加补丁，直接通过 rtc.reset 让双方局部重建。
+        await this.recreatePeer(userId, reason, true, true);
         return;
       }
 
@@ -1374,7 +1390,7 @@ export class RTCController {
       this.onNotice("info", "已切换 TURN 中继", `与 ${user.displayName} 的连接已改用 TURN 中继重建`);
     }
     const nextWrapper = await this.ensurePeer(user, shouldOffer, relayOnly);
-    await this.bindLocalTracks(nextWrapper, true);
+    await this.refreshLocalOutboundForNegotiation(nextWrapper);
     nextWrapper.reconnecting = false;
     nextWrapper.reconnectAttempts = relayOnly ? 1 : 0;
     nextWrapper.lastKnownTransport = relayOnly ? "turn" : nextWrapper.lastKnownTransport;
@@ -1391,6 +1407,7 @@ export class RTCController {
     }
     this.clearPeerReconnect(wrapper);
     this.cancelStableReset(wrapper);
+    this.clearOutboundRehydrateTimers(wrapper);
     this.clearPeerDisconnectTimer(userId);
     this.clearMediaReconnect(userId, "audio");
     this.clearMediaReconnect(userId, "screen");

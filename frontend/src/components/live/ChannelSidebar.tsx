@@ -16,6 +16,8 @@ import type { AudioInputOption } from "../../types/live";
 import type { BootstrapResponse, Channel, PresenceMember, User } from "../../types";
 import { initials } from "../../utils/live";
 
+const FRONTEND_DEBUG_VERSION = 3;
+
 /**
  * 左侧服务器与频道栏组件。
  */
@@ -132,6 +134,25 @@ export function ChannelSidebar(props: {
       </aside>
 
       <aside className="channel-sidebar">
+        <div className="mobile-domain-strip">
+          <div className="mobile-domain-strip__scroll">
+            {(bootstrap?.domains || []).map((domain) => (
+              <button
+                key={domain.id}
+                className={`mobile-domain-chip ${bootstrap?.domain.id === domain.id ? "mobile-domain-chip--active" : ""}`}
+                onClick={() => void switchDomain(domain.id)}
+              >
+                <span className="mobile-domain-chip__avatar">{initials(domain.name)}</span>
+                <span className="mobile-domain-chip__name">{domain.name}</span>
+              </button>
+            ))}
+            <button className="mobile-domain-chip mobile-domain-chip--create" onClick={() => setCreatingDomain(true)}>
+              <span className="mobile-domain-chip__avatar">+</span>
+              <span className="mobile-domain-chip__name">创建域</span>
+            </button>
+          </div>
+        </div>
+
         <div className="sidebar-topbar">
           <div className="sidebar-topbar__controls">
             <div className="sidebar-control-pill">
@@ -253,6 +274,7 @@ export function ChannelSidebar(props: {
           </div>
           <div className="profile-menu-wrap" ref={profileMenuRef}>
             <button className="profile-chip" onClick={() => setShowProfileMenu((value) => !value)} title="账号菜单" aria-label="账号菜单">
+              <span className="profile-chip__version">v{FRONTEND_DEBUG_VERSION}</span>
               <div className="profile-chip__avatar" style={{ background: user?.avatarColor || "#556" }}>
                 {initials(user?.displayName)}
               </div>
