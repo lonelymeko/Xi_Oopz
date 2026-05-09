@@ -160,10 +160,28 @@ export function VoiceAvatarOrb({
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   useEffect(() => {
-    if (!videoRef.current || !screenStream) return;
-    videoRef.current.srcObject = screenStream;
-    void videoRef.current.play().catch(() => undefined);
-  }, [screenStream]);
+    const element = videoRef.current;
+    if (!element) {
+      return;
+    }
+    if (!screenSharing || !screenStream) {
+      element.pause();
+      element.srcObject = null;
+      return;
+    }
+
+    // 本地共享开始时，localScreenStream 会先进入 React 状态，screenSharing 随后才变成 true。
+    // 旧逻辑只监听 screenStream：第一次 effect 运行时 video 还没渲染，直接 return；
+    // screenSharing 变 true 后依赖没变化，导致自己的小窗没有绑定 srcObject，表现为黑屏。
+    // 放大弹窗是点击后才挂载的 video，会重新绑定同一个 stream，所以放大后又能看到。
+    // 因此这里同时监听 screenSharing，并在小窗 video 真正渲染后重新挂流播放。
+    if (element.srcObject !== screenStream) {
+      element.srcObject = screenStream;
+    }
+    element.muted = true;
+    element.playsInline = true;
+    void element.play().catch(() => undefined);
+  }, [screenSharing, screenStream]);
 
   async function openSystemFullscreen() {
     if (!screenStream || !previewRef.current) return;

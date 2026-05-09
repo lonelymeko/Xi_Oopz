@@ -16,7 +16,7 @@ import type { AudioInputOption } from "../../types/live";
 import type { BootstrapResponse, Channel, PresenceMember, User } from "../../types";
 import { initials } from "../../utils/live";
 
-const FRONTEND_DEBUG_VERSION = 3;
+const FRONTEND_DEBUG_VERSION = 5;
 
 /**
  * 左侧服务器与频道栏组件。
