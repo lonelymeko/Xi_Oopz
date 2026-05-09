@@ -43,6 +43,7 @@ type UseLiveRuntimeOptions = {
   pushNotice: (kind: "error" | "info", title: string, message: string) => void;
   voiceLog: (label: string, extra?: Record<string, unknown>) => void;
   screeningLog: (label: string, extra?: Record<string, unknown>) => void;
+  refreshPresence: () => Promise<void>;
 };
 
 /**
@@ -82,6 +83,7 @@ export function useLiveRuntime(options: UseLiveRuntimeOptions) {
     pushNotice,
     voiceLog,
     screeningLog,
+    refreshPresence,
   } = options;
   const socketEventHandlerRef = useRef<(type: string, payload: unknown) => void>(() => {});
   const socketStatusHandlerRef = useRef<(connected: boolean) => void>(() => {});
@@ -115,6 +117,7 @@ export function useLiveRuntime(options: UseLiveRuntimeOptions) {
           setVoiceMembers(nextMembers);
           setOnlineCounts((prev) => ({ ...prev, [String(snapshotPayload.channelId)]: nextMembers.size }));
           void rtcRef.current?.handlePresenceSnapshot(snapshotPayload.members);
+          void refreshPresence();
           break;
         }
         case "member.joined": {
@@ -129,6 +132,7 @@ export function useLiveRuntime(options: UseLiveRuntimeOptions) {
             return next;
           });
           void rtcRef.current?.handleMemberJoined(joinedPayload as PresenceMember);
+          void refreshPresence();
           break;
         }
         case "member.left": {
@@ -143,6 +147,7 @@ export function useLiveRuntime(options: UseLiveRuntimeOptions) {
             return next;
           });
           rtcRef.current?.handleMemberLeft(leftPayload.userId);
+          void refreshPresence();
           break;
         }
         case "chat.message": {
@@ -203,6 +208,7 @@ export function useLiveRuntime(options: UseLiveRuntimeOptions) {
             ...prev,
             [String(screeningSnapshotPayload.state.channelId)]: (screeningSnapshotPayload.viewers || []).map((viewer) => viewer.user),
           }));
+          void refreshPresence();
           break;
         }
         case "screening.play":
@@ -240,6 +246,7 @@ export function useLiveRuntime(options: UseLiveRuntimeOptions) {
       currentUserRef,
       currentVoiceChannelIdRef,
       pushNotice,
+      refreshPresence,
       rtcRef,
       screeningLog,
       setCurrentVoiceChannelId,
@@ -312,7 +319,11 @@ export function useLiveRuntime(options: UseLiveRuntimeOptions) {
     );
 
     return () => {
-      socket.close();
+      const voiceChannelId = currentVoiceChannelIdRef.current;
+      if (voiceChannelId) {
+        void rtcRef.current?.leaveVoice();
+      }
+      socket.close(voiceChannelId ? { type: "channel.leave", payload: { channelId: voiceChannelId } } : undefined);
       socketRef.current = null;
       rtcRef.current = null;
       setPeerDiagnostics(new Map());

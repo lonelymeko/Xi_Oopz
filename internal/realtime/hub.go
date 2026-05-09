@@ -28,42 +28,60 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+const (
+	disconnectCleanupGrace = 12 * time.Second
+	manualCloseCode        = 4000
+)
+
+type pendingDisconnectedMembership struct {
+	domainID           int64
+	voiceChannelID     int64
+	screeningChannelID int64
+	micEnabled         bool
+	screenSharing      bool
+}
+
 type Client struct {
-	conn             *websocket.Conn
-	hub              *Hub
-	send             chan []byte
-	user             models.User
-	domainID         int64
-	currentChannelID int64
+	conn                      *websocket.Conn
+	hub                       *Hub
+	send                      chan []byte
+	user                      models.User
+	domainID                  int64
+	currentChannelID          int64
 	currentScreeningChannelID int64
-	micEnabled       bool
-	screenSharing    bool
+	micEnabled                bool
+	screenSharing             bool
+	manualClose               bool
 }
 
 type Hub struct {
-	store          *store.Store
-	rdb            *redis.Client
-	auth           *auth.TokenManager
-	mu             sync.RWMutex
-	clients        map[*Client]struct{}
-	userClients    map[int64]map[*Client]struct{}
-	channelClients map[int64]map[*Client]struct{}
-	channelUsers   map[int64]map[int64]*PresenceMember
-	screeningClients map[int64]map[*Client]struct{}
-	domainUsers    map[int64]*OnlineUserPresence
+	store                        *store.Store
+	rdb                          *redis.Client
+	auth                         *auth.TokenManager
+	mu                           sync.RWMutex
+	clients                      map[*Client]struct{}
+	userClients                  map[int64]map[*Client]struct{}
+	channelClients               map[int64]map[*Client]struct{}
+	channelUsers                 map[int64]map[int64]*PresenceMember
+	screeningClients             map[int64]map[*Client]struct{}
+	domainUsers                  map[int64]*OnlineUserPresence
+	pendingDisconnectCleanups    map[int64]*time.Timer
+	pendingDisconnectMemberships map[int64]pendingDisconnectedMembership
 }
 
 func NewHub(s *store.Store, rdb *redis.Client, authManager *auth.TokenManager) *Hub {
 	return &Hub{
-		store:          s,
-		rdb:            rdb,
-		auth:           authManager,
-		clients:        map[*Client]struct{}{},
-		userClients:    map[int64]map[*Client]struct{}{},
-		channelClients: map[int64]map[*Client]struct{}{},
-		channelUsers:   map[int64]map[int64]*PresenceMember{},
-		screeningClients: map[int64]map[*Client]struct{}{},
-		domainUsers:    map[int64]*OnlineUserPresence{},
+		store:                        s,
+		rdb:                          rdb,
+		auth:                         authManager,
+		clients:                      map[*Client]struct{}{},
+		userClients:                  map[int64]map[*Client]struct{}{},
+		channelClients:               map[int64]map[*Client]struct{}{},
+		channelUsers:                 map[int64]map[int64]*PresenceMember{},
+		screeningClients:             map[int64]map[*Client]struct{}{},
+		domainUsers:                  map[int64]*OnlineUserPresence{},
+		pendingDisconnectCleanups:    map[int64]*time.Timer{},
+		pendingDisconnectMemberships: map[int64]pendingDisconnectedMembership{},
 	}
 }
 
@@ -115,23 +133,90 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (h *Hub) register(client *Client) {
+	pending, hasPending := h.cancelDisconnectedUserCleanup(client.user.ID)
+	var restoredVoiceSnapshot []PresenceMember
+	var restoredVoiceMember *PresenceMember
+
 	h.mu.Lock()
 	h.clients[client] = struct{}{}
 	if _, ok := h.userClients[client.user.ID]; !ok {
 		h.userClients[client.user.ID] = map[*Client]struct{}{}
 	}
 	h.userClients[client.user.ID][client] = struct{}{}
+	if hasPending && pending.domainID == client.domainID {
+		client.micEnabled = pending.micEnabled
+		client.screenSharing = pending.screenSharing
+		if pending.voiceChannelID != 0 {
+			client.currentChannelID = pending.voiceChannelID
+			if _, ok := h.channelClients[pending.voiceChannelID]; !ok {
+				h.channelClients[pending.voiceChannelID] = map[*Client]struct{}{}
+			}
+			h.channelClients[pending.voiceChannelID][client] = struct{}{}
+			if _, ok := h.channelUsers[pending.voiceChannelID]; !ok {
+				h.channelUsers[pending.voiceChannelID] = map[int64]*PresenceMember{}
+			}
+			member := h.channelUsers[pending.voiceChannelID][client.user.ID]
+			if member == nil {
+				member = &PresenceMember{User: client.user, ChannelID: pending.voiceChannelID}
+				h.channelUsers[pending.voiceChannelID][client.user.ID] = member
+			}
+			member.MicEnabled = client.micEnabled
+			member.ScreenSharing = client.screenSharing
+			restoredVoiceMember = member
+			restoredVoiceSnapshot = make([]PresenceMember, 0, len(h.channelUsers[pending.voiceChannelID]))
+			for _, current := range h.channelUsers[pending.voiceChannelID] {
+				restoredVoiceSnapshot = append(restoredVoiceSnapshot, *current)
+			}
+		}
+		if pending.screeningChannelID != 0 {
+			client.currentScreeningChannelID = pending.screeningChannelID
+			if _, ok := h.screeningClients[pending.screeningChannelID]; !ok {
+				h.screeningClients[pending.screeningChannelID] = map[*Client]struct{}{}
+			}
+			h.screeningClients[pending.screeningChannelID][client] = struct{}{}
+		}
+	}
 	state := h.refreshDomainUserLocked(client.user.ID)
 	h.mu.Unlock()
 
+	if restoredVoiceMember != nil {
+		h.persistPresence(restoredVoiceMember.ChannelID, restoredVoiceMember)
+		client.sendJSON("presence.snapshot", map[string]any{
+			"channelId": restoredVoiceMember.ChannelID,
+			"members":   restoredVoiceSnapshot,
+		})
+		log.Printf("[realtime] restored disconnected voice session user=%d channel=%d", client.user.ID, restoredVoiceMember.ChannelID)
+	}
+	if hasPending && pending.screeningChannelID != 0 && pending.domainID == client.domainID {
+		_ = h.broadcastScreeningSnapshot(pending.screeningChannelID)
+	}
 	h.persistDomainUser(state)
 }
 
 func (h *Hub) unregister(client *Client) {
-	h.leaveChannel(client, true)
-	h.leaveScreening(client, client.currentScreeningChannelID)
-
 	h.mu.Lock()
+	voiceChannelID := client.currentChannelID
+	screeningChannelID := client.currentScreeningChannelID
+
+	if voiceChannelID != 0 {
+		if clients, ok := h.channelClients[voiceChannelID]; ok {
+			delete(clients, client)
+			if len(clients) == 0 {
+				delete(h.channelClients, voiceChannelID)
+			}
+		}
+		client.currentChannelID = 0
+	}
+	if screeningChannelID != 0 {
+		if clients, ok := h.screeningClients[screeningChannelID]; ok {
+			delete(clients, client)
+			if len(clients) == 0 {
+				delete(h.screeningClients, screeningChannelID)
+			}
+		}
+		client.currentScreeningChannelID = 0
+	}
+
 	delete(h.clients, client)
 	if group, ok := h.userClients[client.user.ID]; ok {
 		delete(group, client)
@@ -143,16 +228,79 @@ func (h *Hub) unregister(client *Client) {
 	state := h.refreshDomainUserLocked(client.user.ID)
 	h.mu.Unlock()
 
-	if remainingClients == 0 {
+	if client.manualClose {
 		h.removeUserFromAllVoiceChannels(client.user.ID, 0)
 		h.removeUserFromAllScreeningRooms(client.user.ID, 0)
-	}
-	if state == nil {
 		h.removeDomainUser(client.user.ID)
+	} else if remainingClients == 0 {
+		h.scheduleDisconnectedUserCleanup(client.user.ID, client.domainID, voiceChannelID, screeningChannelID, client.micEnabled, client.screenSharing)
 	} else {
-		h.persistDomainUser(state)
+		_, _ = h.cancelDisconnectedUserCleanup(client.user.ID)
+		if state == nil {
+			h.removeDomainUser(client.user.ID)
+		} else {
+			h.persistDomainUser(state)
+		}
 	}
 	close(client.send)
+}
+
+func (h *Hub) scheduleDisconnectedUserCleanup(userID, domainID, voiceChannelID, screeningChannelID int64, micEnabled, screenSharing bool) {
+	_, _ = h.cancelDisconnectedUserCleanup(userID)
+	if voiceChannelID == 0 && screeningChannelID == 0 {
+		h.removeDomainUser(userID)
+		return
+	}
+
+	var timer *time.Timer
+	timer = time.AfterFunc(disconnectCleanupGrace, func() {
+		h.mu.Lock()
+		if timer, ok := h.pendingDisconnectCleanups[userID]; ok {
+			timer.Stop()
+			delete(h.pendingDisconnectCleanups, userID)
+		}
+		delete(h.pendingDisconnectMemberships, userID)
+		hasActiveClients := len(h.userClients[userID]) > 0
+		h.mu.Unlock()
+		if hasActiveClients {
+			return
+		}
+
+		log.Printf("[realtime] disconnected cleanup user=%d voice_channel=%d screening_channel=%d grace=%s", userID, voiceChannelID, screeningChannelID, disconnectCleanupGrace)
+		h.removeUserFromAllVoiceChannels(userID, 0)
+		h.removeUserFromAllScreeningRooms(userID, 0)
+		h.removeDomainUser(userID)
+	})
+
+	h.mu.Lock()
+	h.pendingDisconnectCleanups[userID] = timer
+	h.pendingDisconnectMemberships[userID] = pendingDisconnectedMembership{
+		domainID:           domainID,
+		voiceChannelID:     voiceChannelID,
+		screeningChannelID: screeningChannelID,
+		micEnabled:         micEnabled,
+		screenSharing:      screenSharing,
+	}
+	h.mu.Unlock()
+	log.Printf("[realtime] scheduled disconnected cleanup user=%d voice_channel=%d screening_channel=%d grace=%s", userID, voiceChannelID, screeningChannelID, disconnectCleanupGrace)
+}
+
+func (h *Hub) cancelDisconnectedUserCleanup(userID int64) (pendingDisconnectedMembership, bool) {
+	h.mu.Lock()
+	timer, ok := h.pendingDisconnectCleanups[userID]
+	if ok {
+		timer.Stop()
+		delete(h.pendingDisconnectCleanups, userID)
+	}
+	pending, hasPending := h.pendingDisconnectMemberships[userID]
+	if hasPending {
+		delete(h.pendingDisconnectMemberships, userID)
+	}
+	h.mu.Unlock()
+	if ok {
+		log.Printf("[realtime] canceled disconnected cleanup user=%d", userID)
+	}
+	return pending, hasPending
 }
 
 func (h *Hub) OnlineCounts(channelIDs []int64) map[string]int64 {
@@ -422,6 +570,7 @@ func (h *Hub) handleScreenState(client *Client, payload ScreenStatePayload) {
 }
 
 func (h *Hub) joinChannel(client *Client, channelID int64) error {
+	_, _ = h.cancelDisconnectedUserCleanup(client.user.ID)
 	channel, err := h.store.GetChannel(channelID)
 	if err != nil {
 		return err
@@ -512,6 +661,7 @@ func (h *Hub) leaveChannel(client *Client, persist bool) {
 }
 
 func (h *Hub) joinScreening(client *Client, channelID int64) error {
+	_, _ = h.cancelDisconnectedUserCleanup(client.user.ID)
 	log.Printf("[screening-backend] join channel=%d user=%d current=%d", channelID, client.user.ID, client.currentScreeningChannelID)
 	channel, err := h.store.GetChannel(channelID)
 	if err != nil {
@@ -846,27 +996,27 @@ func (h *Hub) updateScreeningPlayback(client *Client, eventType string, payload 
 	case "screening.play":
 		state.PlaybackState = "playing"
 		state.AwaitingReady = false
-		state.StartedAt = now.Add(-time.Duration((payload.CurrentTime/state.PlaybackRate)*float64(time.Second)))
+		state.StartedAt = now.Add(-time.Duration((payload.CurrentTime / state.PlaybackRate) * float64(time.Second)))
 	case "screening.pause":
 		state.PlaybackState = "paused"
 	case "screening.seek":
 		if state.PlaybackState == "playing" {
-			state.StartedAt = now.Add(-time.Duration((payload.CurrentTime/state.PlaybackRate)*float64(time.Second)))
+			state.StartedAt = now.Add(-time.Duration((payload.CurrentTime / state.PlaybackRate) * float64(time.Second)))
 		}
 	case "screening.tick":
 		if state.PlaybackState == "playing" {
-			state.StartedAt = now.Add(-time.Duration((payload.CurrentTime/state.PlaybackRate)*float64(time.Second)))
+			state.StartedAt = now.Add(-time.Duration((payload.CurrentTime / state.PlaybackRate) * float64(time.Second)))
 		}
 	case "screening.rate":
 		if state.PlaybackState == "playing" {
-			state.StartedAt = now.Add(-time.Duration((payload.CurrentTime/state.PlaybackRate)*float64(time.Second)))
+			state.StartedAt = now.Add(-time.Duration((payload.CurrentTime / state.PlaybackRate) * float64(time.Second)))
 		}
 	}
 	if readyOnly {
 		state.PlaybackState = "playing"
 		state.AwaitingReady = false
 		state.CurrentTime = payload.CurrentTime
-		state.StartedAt = now.Add(-time.Duration((payload.CurrentTime/state.PlaybackRate)*float64(time.Second)))
+		state.StartedAt = now.Add(-time.Duration((payload.CurrentTime / state.PlaybackRate) * float64(time.Second)))
 		if err := h.markScreeningViewerReady(payload.ChannelID, client.user.ID); err != nil {
 			return err
 		}
@@ -1339,10 +1489,10 @@ func (h *Hub) removeDomainUser(userID int64) {
 
 func (h *Hub) refreshDomainUserLocked(userID int64) *OnlineUserPresence {
 	var (
-		found       bool
+		found         bool
 		currentDomain int64
-		current     int64
-		currentUser models.User
+		current       int64
+		currentUser   models.User
 	)
 
 	for client := range h.clients {
@@ -1397,6 +1547,9 @@ func (c *Client) readPump() {
 	for {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
+			if closeError, ok := err.(*websocket.CloseError); ok && closeError.Code == manualCloseCode {
+				c.manualClose = true
+			}
 			break
 		}
 		c.hub.Handle(c, message)

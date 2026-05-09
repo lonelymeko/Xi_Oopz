@@ -5,6 +5,9 @@ type SocketFrame = {
   payload: unknown;
 };
 
+const MANUAL_CLOSE_CODE = 4000;
+const MANUAL_CLOSE_REASON = "manual-close";
+
 /**
  * 判断运行时数据是否符合 Socket 帧结构。
  */
@@ -149,13 +152,16 @@ export class SocketClient {
     });
   }
 
-  close() {
+  close(finalMessage?: SocketFrame) {
     this.manualClose = true;
     this.generation += 1;
     this.clearTimers();
     const current = this.socket;
     this.socket = null;
-    current?.close();
+    if (current?.readyState === WebSocket.OPEN && finalMessage) {
+      current.send(JSON.stringify(finalMessage));
+    }
+    current?.close(MANUAL_CLOSE_CODE, MANUAL_CLOSE_REASON);
     this.notifyStatus(false);
     this.debugLog("connect:manual-close");
   }

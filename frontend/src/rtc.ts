@@ -21,6 +21,7 @@ type PeerWrapper = {
   lastKnownTransport: PeerConnectionDiagnostics["transport"];
   statsTimer: number | null;
   stableTimer: number | null;
+  lastRecoveryTrackRefreshAt: number;
 };
 
 type SignalPayload = {
@@ -788,6 +789,7 @@ export class RTCController {
       lastKnownTransport: relayOnly ? "turn" : "unknown",
       statsTimer: null,
       stableTimer: null,
+      lastRecoveryTrackRefreshAt: 0,
     };
 
     pc.addEventListener("icecandidate", (event) => {
@@ -871,10 +873,7 @@ export class RTCController {
 
     pc.addEventListener("iceconnectionstatechange", () => {
       if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
-        this.clearPeerReconnect(wrapper, false);
-        this.clearPeerDisconnectTimer(user.id);
-        this.scheduleStableReset(wrapper);
-        this.startPeerStats(wrapper);
+        void this.handlePeerConnected(wrapper);
         return;
       }
       if (pc.iceConnectionState === "disconnected") {
@@ -894,10 +893,7 @@ export class RTCController {
 
     pc.addEventListener("connectionstatechange", () => {
       if (pc.connectionState === "connected") {
-        this.clearPeerReconnect(wrapper, false);
-        this.clearPeerDisconnectTimer(user.id);
-        this.scheduleStableReset(wrapper);
-        this.startPeerStats(wrapper);
+        void this.handlePeerConnected(wrapper);
         return;
       }
       if (pc.connectionState === "disconnected") {
@@ -945,6 +941,54 @@ export class RTCController {
     wrapper.screenTransceiver.direction = screenTrack ? "sendrecv" : "recvonly";
 
     wrapper.hasBoundLocalTracks = includeLocalTracks;
+  }
+
+  private async handlePeerConnected(wrapper: PeerWrapper) {
+    const shouldRefreshTracks = wrapper.reconnectAttempts > 0 || wrapper.reconnecting;
+    this.clearPeerReconnect(wrapper, false);
+    this.clearPeerDisconnectTimer(wrapper.user.id);
+    this.scheduleStableReset(wrapper);
+    this.startPeerStats(wrapper);
+
+    if (!shouldRefreshTracks) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - wrapper.lastRecoveryTrackRefreshAt < 1000) {
+      return;
+    }
+    wrapper.lastRecoveryTrackRefreshAt = now;
+    await this.refreshOutboundMediaAfterReconnect(wrapper);
+  }
+
+  private async refreshOutboundMediaAfterReconnect(wrapper: PeerWrapper) {
+    if (!this.voiceSessionActive || !this.getCurrentVoiceChannelId()) {
+      return;
+    }
+    await this.syncLocalAudioState();
+    const [audioTrack] = this.localAudioStream?.getAudioTracks() || [];
+    if (audioTrack) {
+      await wrapper.audioTransceiver.sender.replaceTrack(null);
+      await wrapper.audioTransceiver.sender.replaceTrack(audioTrack);
+      wrapper.audioTransceiver.direction = "sendrecv";
+    }
+    const [screenTrack] = this.localScreenStream?.getVideoTracks() || [];
+    if (screenTrack) {
+      await wrapper.screenTransceiver.sender.replaceTrack(null);
+      await wrapper.screenTransceiver.sender.replaceTrack(screenTrack);
+      wrapper.screenTransceiver.direction = "sendrecv";
+    }
+    this.socket.send("voice.state", {
+      channelId: this.getCurrentVoiceChannelId(),
+      micEnabled: this.micEnabled,
+    });
+    if (this.localScreenStream) {
+      this.socket.send("screen.state", {
+        channelId: this.getCurrentVoiceChannelId(),
+        screenSharing: true,
+      });
+    }
   }
 
   private async applyLocalTracksToAllPeers() {
@@ -1216,8 +1260,36 @@ export class RTCController {
       !wrapper.useRelayOnly && wrapper.lastKnownTransport !== "turn" &&
       (attempt >= 2 && this.getRelayIceServers().length > 0);
     const isTurnConnection = wrapper.useRelayOnly || wrapper.lastKnownTransport === "turn";
+    const currentUser = this.getCurrentUser();
+    const shouldInitiateRestart = currentUser != null && currentUser.id < wrapper.user.id;
 
     try {
+      if (
+        isTurnConnection &&
+        attempt === 1 &&
+        shouldInitiateRestart &&
+        wrapper.pc.signalingState === "stable" &&
+        !wrapper.makingOffer
+      ) {
+        const offer = await wrapper.pc.createOffer({ iceRestart: true });
+        await wrapper.pc.setLocalDescription(offer);
+        this.socket.send("rtc.offer", {
+          channelId: this.getCurrentVoiceChannelId(),
+          targetUserId: wrapper.user.id,
+          sdp: wrapper.pc.localDescription?.sdp,
+        });
+        this.log("reconnect:ice-restart", { userId: wrapper.user.id, attempt, reason, relayOnly: true });
+        wrapper.reconnecting = false;
+        this.schedulePeerReconnect(userId, RTCController.ICE_RESTART_TIMEOUT_MS, "turn-ice-restart-timeout");
+        return;
+      }
+
+      if (isTurnConnection && attempt === 1 && !shouldInitiateRestart) {
+        wrapper.reconnecting = false;
+        this.schedulePeerReconnect(userId, RTCController.ICE_RESTART_TIMEOUT_MS, "awaiting-remote-turn-restart");
+        return;
+      }
+
       if (
         !switchingToRelay &&
         wrapper.pc.signalingState === "stable" &&
