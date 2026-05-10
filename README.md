@@ -231,9 +231,9 @@ http://localhost:8080
 ```bash
 # 多个地址使用逗号分隔
 WEBRTC_STUN_URLS=stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302
-WEBRTC_TURN_URLS=turn:turn.xixiu.top:3478,turn:turn.xixiu.top:3478?transport=tcp
-WEBRTC_TURN_USERNAME=xixiu
-WEBRTC_TURN_CREDENTIAL=123456
+WEBRTC_TURN_URLS=
+WEBRTC_TURN_USERNAME=
+WEBRTC_TURN_CREDENTIAL=
 ```
 
 生产环境请通过密钥系统或部署环境变量注入 TURN 凭据，避免把凭据写入代码仓库。
