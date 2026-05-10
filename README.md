@@ -29,6 +29,17 @@
 - 语音 / 共享断流后的自动补连
 - Discord 风格三栏桌面 UI
 
+## 近期提交重点
+
+最近几次提交主要围绕 WebRTC 在真实网络波动下的稳定性做了修复：
+
+- TURN 断线后不再只依赖 ICE restart，relay 链路异常时会通过局部重建 PeerConnection 恢复连接，避免用户被误判为直接退出频道。
+- 修复 TURN 重连后单向无声问题：重连、重新协商、收到 offer/answer 前后都会刷新本地 outbound 音频轨道，屏幕共享音频也会被当作有效音频源处理。
+- 增加重连成功后的延迟 sender rehydrate：对浏览器可能保留旧 RTCRtpSender 但实际不发 RTP 的情况，使用 `replaceTrack(null -> track)` 强制刷新发送管线，避免手机端必须手动关麦再开麦。
+- 清理了早期依赖自动 toggleMic 的补丁思路，避免污染用户真实的麦克风静音状态。
+- 修复本地屏幕共享小窗黑屏：小窗预览会同时监听 `screenSharing` 和 `screenStream`，确保 video 元素渲染后重新绑定本地共享流；放大预览与小窗预览表现保持一致。
+- 在头像旁加入前端调试版本号，便于确认浏览器实际加载的是否为最新前端资源。
+
 ## 技术栈
 
 - 前端：React + TypeScript + Vite
