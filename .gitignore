@@ -11,6 +11,12 @@ frontend/dist/
 release/
 *.tsbuildinfo
 
+# local build artifacts
+/server
+/oopz-live-linux-amd64
+/cmd/server/server
+/cmd/server/oopz-live-linux-amd64
+
 # frontend
 pnpm-lock.yaml
 yarn.lock

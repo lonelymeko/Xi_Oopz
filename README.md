@@ -19,14 +19,17 @@
 - 邮箱验证码注册与登录
 - 多域 Domain 切换
 - 文字频道 / 语音频道
+- 放映室频道：直链视频同步播放、播放列表、控制权转移
 - 频道文字消息实时广播与持久化
 - 语音频道在线成员实时同步
 - 麦克风开关状态同步
 - 屏幕共享状态同步
 - WebRTC 音频通话
-- WebRTC 屏幕共享
+- WebRTC 屏幕共享，支持本地预览、放大与系统全屏
+- 屏幕共享音频：支持标签页音频 / 系统音频采集策略
 - 远端音频音量调节
-- 语音 / 共享断流后的自动补连
+- 语音 / 共享断流后的自动补连与 TURN 重连恢复
+- 连接诊断：显示局域网 / STUN / TURN 链路、RTT 与重连状态
 - Discord 风格三栏桌面 UI
 
 ## 近期提交重点
@@ -120,8 +123,7 @@
 │   ├── realtime               # WebSocket Hub
 │   └── store                  # GORM + 数据访问
 ├── migrations                 # 初始化 SQL
-├── release                    # 部署目录（构建产物不入库）
-└── scripts                    # 启动与辅助脚本
+└── release                    # 部署目录（构建产物不入库）
 ```
 
 ## 本地开发
@@ -135,6 +137,8 @@ docker compose up -d
 ### 2. 启动后端
 
 ```bash
+cp .env.example .env
+# docker-compose.yml 默认把 MySQL 暴露到宿主 3307，.env.example 已按该端口配置 MYSQL_DSN。
 go mod tidy
 go run ./cmd/server
 ```
@@ -145,8 +149,8 @@ go run ./cmd/server
 
 ```bash
 cd frontend
-pnpm install
-pnpm dev
+npm install
+npm run dev
 ```
 
 前端开发环境默认采用“直连后端”模式（不经过 Vite 代理），请先配置：
@@ -160,15 +164,24 @@ VITE_WS_BASE_URL=wss://oopz.xixiu.top
 "@ | Set-Content .env.development
 ```
 
-如果你改过配置但浏览器仍命中旧地址，请先停止已有 `vite` 进程再重新执行 `pnpm dev`。
+本地直连后端时可改成：
+
+```bash
+cat > .env.development <<'EOF'
+VITE_API_BASE_URL=http://localhost:8080
+VITE_WS_BASE_URL=ws://localhost:8080
+EOF
+```
+
+如果你改过配置但浏览器仍命中旧地址，请先停止已有 `vite` 进程再重新执行 `npm run dev`。
 
 推荐在本地提交流程中执行：
 
 ```bash
 cd frontend
-pnpm lint
-pnpm run format:check
-pnpm run test:run
+npm run lint
+npm run format:check
+npm run test:run
 ```
 
 开发模式访问：
@@ -181,8 +194,8 @@ http://localhost:5173
 
 ```bash
 cd frontend
-pnpm install
-pnpm run build
+npm install
+npm run build
 cd ..
 go run ./cmd/server
 ```
@@ -227,6 +240,10 @@ WEBRTC_TURN_CREDENTIAL=123456
 
 ## 主要接口
 
+### 健康检查
+
+- `GET /healthz`
+
 ### 鉴权
 
 - `POST /api/auth/send-verification-code`
@@ -264,101 +281,276 @@ WEBRTC_TURN_CREDENTIAL=123456
 - `rtc.answer`
 - `rtc.ice_candidate`
 - `media.sync_request`
+- `screening.join`
+- `screening.leave`
+- `screening.url.replace`
+- `screening.url.add`
+- `screening.play`
+- `screening.pause`
+- `screening.seek`
+- `screening.tick`
+- `screening.rate`
+- `screening.item.ended`
 
 ## 部署说明
 
-项目支持直接部署到已有 MySQL / Redis 的服务器环境，不依赖 Docker 运行。
+当前仓库的服务拆分如下：
 
-### 推荐部署方式
+- 后端：`cmd/server`，Gin HTTP API + WebSocket + 前端静态文件兜底服务。
+- 前端：`frontend`，React + Vite，构建产物为 `frontend/dist`。
+- 数据库：MySQL 8.x，后端启动时会执行 GORM AutoMigrate 并补默认种子数据。
+- 缓存 / 在线状态：Redis 7.x，用于在线成员、语音频道、放映室状态与 WebSocket presence。
+- TURN / STUN：由后端环境变量生成 ICE servers，下发给前端。
 
-- Nginx：负责 HTTPS、静态文件、WebSocket 反向代理
-- Gin：只监听本机 HTTP 端口，例如 `127.0.0.1:18080`
-- MySQL：使用服务器已有实例
-- Redis：使用服务器已有实例
+### 部署产物与目录
 
-### 部署产物
-
-仓库仅保留部署模板与源码，不再提交预构建二进制。  
-发布时请通过仓库外手工分发方式获取二进制，并放入部署目录：
-
-- Linux `amd64` 二进制：`release/oopz-live-linux-amd64`（手工分发）
-- Linux `arm64` 二进制：`release/oopz-live-linux-arm64`（手工分发）
-- Nginx 模板：`deploy/nginx/oopz.xixiu.top.conf`
-- systemd 模板：`deploy/systemd/oopz-live.service`
-
-### 典型目录结构
+仓库不跟踪构建产物。生产部署时建议目录为：
 
 ```text
 /home/oopz/oopz-live/
-├── frontend/dist
-├── release/oopz-live-linux-amd64
-└── .env
+├── .env
+├── frontend/
+│   └── dist/
+└── release/
+    └── oopz-live-linux-amd64
 ```
 
-### 仓库边界约定
+`.gitignore` 已排除 `release/`、`frontend/dist/`、根目录和 `cmd/server` 下的本地二进制，避免误提交部署产物。
 
-- 可跟踪：源码、配置模板、脚本、文档。
-- 不可跟踪：构建产物与本地发布二进制（如 `release/`、`frontend/dist/`、`*.tsbuildinfo`）。
+### 方式 A：Nginx 静态前端 + systemd 后端
 
-### systemd
+这是公网部署推荐方式。Nginx 负责 HTTPS、静态文件、`/api` 与 `/ws` 反向代理；Gin 只监听本机端口。
 
-将模板复制到：
-
-```text
-/etc/systemd/system/oopz-live.service
-```
-
-然后执行：
+1. 准备服务器依赖：
 
 ```bash
+sudo apt update
+sudo apt install -y nginx mysql-server redis-server
+```
+
+2. 准备数据库：
+
+```sql
+CREATE DATABASE oopz CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'oopz'@'127.0.0.1' IDENTIFIED BY 'replace-with-password';
+GRANT ALL PRIVILEGES ON oopz.* TO 'oopz'@'127.0.0.1';
+FLUSH PRIVILEGES;
+```
+
+3. 准备服务器 `.env`：
+
+```bash
+sudo mkdir -p /home/oopz/oopz-live/release /home/oopz/oopz-live/frontend
+sudo cp .env.example /home/oopz/oopz-live/.env
+sudo editor /home/oopz/oopz-live/.env
+```
+
+生产环境示例：
+
+```env
+PORT=18080
+MYSQL_DSN=oopz:replace-with-password@tcp(127.0.0.1:3306)/oopz?parseTime=true&multiStatements=true
+REDIS_ADDR=127.0.0.1:6379
+REDIS_PASSWORD=
+AUTH_SECRET=replace-with-a-strong-random-secret
+
+EMAIL_ENABLED=true
+EMAIL_HOST=smtp.example.com
+EMAIL_PORT=587
+EMAIL_USER=your-email@example.com
+EMAIL_PASSWORD=replace-with-email-password
+EMAIL_FROM_NAME=Oopz Live
+
+WEBRTC_STUN_URLS=stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302
+WEBRTC_TURN_URLS=turn:turn.example.com:3478,turn:turn.example.com:3478?transport=tcp
+WEBRTC_TURN_USERNAME=replace-with-turn-username
+WEBRTC_TURN_CREDENTIAL=replace-with-turn-credential
+```
+
+4. 构建后端二进制：
+
+```bash
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o release/oopz-live-linux-amd64 ./cmd/server
+```
+
+5. 构建前端：
+
+```bash
+cd frontend
+npm ci
+cat > .env.production <<'EOF'
+VITE_API_BASE_URL=https://oopz.example.com
+VITE_WS_BASE_URL=wss://oopz.example.com
+EOF
+npm run build
+cd ..
+```
+
+如果前后端同域部署，`VITE_WS_BASE_URL` 可以省略，前端会从 `VITE_API_BASE_URL` 自动推导为 `wss://` 或 `ws://`。
+
+6. 上传产物：
+
+```bash
+rsync -av release/oopz-live-linux-amd64 user@server:/home/oopz/oopz-live/release/
+rsync -av --delete frontend/dist/ user@server:/home/oopz/oopz-live/frontend/dist/
+```
+
+7. 安装 systemd 服务：
+
+```bash
+sudo cp deploy/systemd/oopz-live.service /etc/systemd/system/oopz-live.service
 sudo systemctl daemon-reload
 sudo systemctl enable oopz-live
-sudo systemctl start oopz-live
+sudo systemctl restart oopz-live
 sudo systemctl status oopz-live
 ```
 
-查看日志：
+`deploy/systemd/oopz-live.service` 默认从 `/home/oopz/oopz-live/.env` 读取配置，避免把密钥写进 service 文件。
+
+8. 安装 Nginx 配置：
 
 ```bash
-sudo journalctl -u oopz-live -f
-```
-
-### Nginx
-
-将模板复制到：
-
-```text
-/etc/nginx/conf.d/oopz.xixiu.top.conf
-```
-
-或按你的系统习惯放到：
-
-```text
-/etc/nginx/sites-available/oopz.xixiu.top.conf
-/etc/nginx/sites-enabled/oopz.xixiu.top.conf
-```
-
-检查与重载：
-
-```bash
+sudo cp deploy/nginx/oopz.xixiu.top.conf /etc/nginx/conf.d/oopz.example.com.conf
+sudo editor /etc/nginx/conf.d/oopz.example.com.conf
 sudo nginx -t
 sudo systemctl reload nginx
 ```
 
+需要替换模板里的 `server_name`、证书路径、`root /home/oopz/oopz-live/frontend/dist`，以及后端代理端口 `127.0.0.1:18080`。
+
+9. 验证：
+
+```bash
+curl -fsS http://127.0.0.1:18080/healthz
+curl -I https://oopz.example.com
+sudo journalctl -u oopz-live -f
+```
+
+### 方式 B：Gin 直接服务前端 dist
+
+适合内网、小规模部署或暂时不接 Nginx 的场景。后端会在检测到 `./frontend/dist` 时服务 `/assets` 和 `/`。
+
+```bash
+cp .env.example .env
+cd frontend
+npm ci
+cat > .env.production <<'EOF'
+VITE_API_BASE_URL=http://your-server:8080
+EOF
+npm run build
+cd ..
+go build -o release/oopz-live ./cmd/server
+./release/oopz-live
+```
+
+这种方式仍然建议在公网前面放 HTTPS 代理。浏览器屏幕共享、麦克风和 WebRTC 在公网环境通常需要 HTTPS。
+
+### 方式 C：前后端分开部署
+
+适合把前端放到 CDN / 对象存储 / 静态站点服务，后端单独运行在 API 域名的场景。
+
+1. 后端域名示例：`https://api.oopz.example.com`
+2. 前端域名示例：`https://app.oopz.example.com`
+3. 后端只需要暴露：
+
+```text
+GET /healthz
+/api/*
+GET /ws
+```
+
+4. 前端构建时写入后端地址：
+
+```bash
+cd frontend
+npm ci
+cat > .env.production <<'EOF'
+VITE_API_BASE_URL=https://api.oopz.example.com
+VITE_WS_BASE_URL=wss://api.oopz.example.com
+EOF
+npm run build
+```
+
+5. 将 `frontend/dist` 上传到静态站点，并配置 SPA fallback：
+
+```text
+/assets/*  -> 静态文件，建议长缓存
+/*         -> /index.html
+```
+
+6. 后端部署：
+
+```bash
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o release/oopz-live-linux-amd64 ./cmd/server
+scp release/oopz-live-linux-amd64 user@server:/home/oopz/oopz-live/release/
+scp .env user@server:/home/oopz/oopz-live/.env
+sudo systemctl restart oopz-live
+```
+
+注意：当前后端没有专门的 CORS 中间件。前后端分开域名时，建议优先通过同一 Nginx 域名做路径转发；如果必须跨域，需要补充后端 CORS 配置后再开放生产访问。
+
+### Docker Compose 说明
+
+当前 `docker-compose.yml` 只负责本地 MySQL / Redis 依赖，不构建业务服务：
+
+```bash
+docker compose up -d
+docker compose ps
+```
+
+默认端口：
+
+- MySQL：宿主 `3307` -> 容器 `3306`
+- Redis：宿主 `6379` -> 容器 `6379`
+
+可通过环境变量覆盖：
+
+```bash
+MYSQL_ROOT_PASSWORD=strong-password MYSQL_PORT=3306 REDIS_PORT=6380 docker compose up -d
+```
+
+如果使用默认 Compose 配置，本地后端 `.env` 里的 DSN 应为：
+
+```env
+MYSQL_DSN=root:password@tcp(127.0.0.1:3307)/oopz?parseTime=true&multiStatements=true
+REDIS_ADDR=127.0.0.1:6379
+```
+
+### GitHub Actions 自动部署
+
+仓库包含 `.github/workflows/deploy.yml`，当前流程会：
+
+1. 执行 `go test ./...`
+2. 使用 `npm ci && npm run build` 构建前端
+3. 构建 `release/oopz-live-linux-amd64`
+4. 通过 SSH/SCP 上传二进制和 `frontend/dist`
+5. 重启远端 `oopz-live` systemd 服务
+6. 请求 `http://127.0.0.1:18080/healthz` 验证
+
+需要配置的 GitHub Secrets：
+
+- `SERVER_HOST`
+- `SERVER_USER`
+- `SERVER_PORT`
+- `SERVER_SSH_KEY`
+- `SERVER_SSH_PASSPHRASE`
+- `SERVER_DEPLOY_PATH`
+
 ## TURN / STUN
 
-当前前端默认内置：
+当前 ICE 配置由后端根据环境变量生成，并通过 `bootstrap` 数据下发给前端：
 
-- Google STUN
-- 自定义 TURN
+- `WEBRTC_STUN_URLS`：逗号分隔的 STUN 地址列表。
+- `WEBRTC_TURN_URLS`：逗号分隔的 TURN 地址列表。
+- `WEBRTC_TURN_USERNAME` / `WEBRTC_TURN_CREDENTIAL`：TURN 凭据。
 
-如果你准备公开部署，建议使用你自己的 TURN 配置，并把凭据改成环境变量或服务端下发，而不是写死在前端代码里。
+公开部署建议必须配置自己的 TURN 服务，尤其是手机流量、校园网、公司网、跨运营商网络等场景。TURN 凭据不要写死到前端源码或 README 示例里，生产环境应放在服务器环境变量、systemd `EnvironmentFile` 或密钥系统中。
 
 ## 当前实现说明
 
-### 本次修补说明
+### 当前 WebRTC 恢复策略
 
-这一次主要集中修了语音房在线状态、WebRTC 重连链路，以及 TURN 诊断可观测性。
+当前实现主要增强了语音房在线状态、WebRTC 重连链路、TURN 诊断与屏幕共享体验。
 
 已修复的问题：
 
@@ -372,9 +564,12 @@ sudo systemctl reload nginx
 - 后端在用户加入频道前，会先清理该用户在其它语音频道和放映室中的残留成员记录，保证单用户同一时间只在一个频道在线。
 - 后端在 WebSocket 连接完全断开且该用户没有其它活跃连接时，会把该用户从所有 Redis presence / screening viewers 中兜底清除，并同步移出在线状态。
 - 前端语音会话增加了显式的 `voiceSessionActive` 保护；离开频道后不再处理新的 RTC 信令或重连流程，避免被远端残留消息重新拉起 PeerConnection。
-- WebRTC 首次建连现在默认同时下发 STUN + TURN，并使用 `iceTransportPolicy: "all"`；首次失败先 `ICE restart`，再次失败再升级为 `relay-only` 重建。
+- WebRTC 首次建连默认下发 STUN + TURN，并使用 `iceTransportPolicy: "all"`；普通网络波动优先尝试 ICE restart，TURN/relay 链路异常时直接通过 `rtc.reset` 局部重建双方 PeerConnection，避免旧 transceiver / sender 状态卡住。
+- 重连、重新协商、收到 offer/answer 前会刷新本地 outbound track；重连 connected 后还会延迟执行 sender rehydrate，通过 `replaceTrack(null -> track)` 强制刷新浏览器 RTP 发送管线。
+- 屏幕共享音频被纳入本地音频源判断，避免“关麦但共享系统/标签页音频”时重连后没有重新发送音频。
 - 前端补充了 ICE 配置、candidate、selected pair、频道状态变更等调试日志，便于排查“为何自动离房”“为何没有切到 TURN”“为何退出后音频未停”等问题。
 - 连接诊断面板现在会显示实际链路类型（局域网 / STUN / TURN）、RTT、重试次数，以及当前恢复方式（稳定 / ICE 重启 / TURN 中继）。
+- 本地屏幕共享小窗会在 `screenSharing` 和 `screenStream` 变化后重新绑定 video stream，避免自己看到黑屏而放大预览正常。
 
 ### 关于“降噪”
 
@@ -417,7 +612,7 @@ sudo systemctl reload nginx
 ## 已知限制
 
 - 目前是 Mesh 架构，不适合大房间
-- 前端状态与 UI 仍以桌面端为主，移动端未专门优化
+- 前端已有基础响应式样式，但主要体验仍以桌面端语音房为主
 - 屏幕共享与 RTC 恢复逻辑仍属于工程化增强版 MVP，不是 SFU 级实现
 - 多实例部署时，WebSocket 广播层还需要补 Redis Pub/Sub 或消息总线
 
@@ -429,6 +624,10 @@ sudo systemctl reload nginx
 - 更稳定的 WebRTC 策略与统计面板
 - SFU 架构升级
 - 移动端与桌面壳封装
+
+## 开源协议
+
+本项目采用 MIT License，详见 [LICENSE](./LICENSE)。
 
 ---
 

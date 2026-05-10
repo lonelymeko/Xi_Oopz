@@ -7,21 +7,7 @@ Type=simple
 User=root
 Group=root
 WorkingDirectory=/home/oopz/oopz-live
-Environment=PORT=18080
-Environment=MYSQL_DSN=root:password@tcp(127.0.0.1:3306)/oopz?parseTime=true&multiStatements=true
-Environment=REDIS_ADDR=127.0.0.1:6379
-Environment=REDIS_PASSWORD=
-Environment=AUTH_SECRET=replace-with-your-secret
-Environment=EMAIL_ENABLED=true
-Environment=EMAIL_HOST=smtp.qq.com
-Environment=EMAIL_PORT=587
-Environment=EMAIL_USER=replace-with-your-email
-Environment=EMAIL_PASSWORD=replace-with-your-password
-Environment=EMAIL_FROM_NAME=Oopz Live
-Environment=WEBRTC_STUN_URLS=stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302
-Environment=WEBRTC_TURN_URLS=turn:turn.xixiu.top:3478,turn:turn.xixiu.top:3478?transport=tcp
-Environment=WEBRTC_TURN_USERNAME=xixiu
-Environment=WEBRTC_TURN_CREDENTIAL=123456
+EnvironmentFile=/home/oopz/oopz-live/.env
 ExecStart=/home/oopz/oopz-live/release/oopz-live-linux-amd64
 Restart=always
 RestartSec=3
