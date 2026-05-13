@@ -1,4 +1,5 @@
 # Oopz Live
+前端体验地址：https://oopz.xixiu.top
 
 一个参考 Discord 交互方式实现的实时语音、文字聊天、屏幕共享 Web 应用。
 
