@@ -122,16 +122,77 @@
 │   ├── notify                 # 邮件发送
 │   ├── realtime               # WebSocket Hub
 │   └── store                  # GORM + 数据访问
-├── migrations                 # 初始化 SQL
+├── migrations                 # 早期 SQL 迁移参考，当前启动由 GORM AutoMigrate 建表
 └── release                    # 部署目录（构建产物不入库）
+```
+
+## Docker 一键运行
+
+当前 `Dockerfile` 会先构建 React/Vite 前端，再编译 Go 后端；`docker-compose.yml` 会同时启动应用、MySQL 8.4 和 Redis 7.4。用户只需要安装 Docker，就可以把前后端和依赖一起跑起来。
+
+```bash
+docker compose up --build -d
+docker compose ps
+```
+
+访问：
+
+```text
+http://localhost:8080
+```
+
+健康检查：
+
+```bash
+curl http://localhost:8080/healthz
+```
+
+默认端口：
+
+- Web 应用：宿主 `8080` -> 容器 `8080`
+- MySQL：宿主 `3307` -> 容器 `3306`
+- Redis：宿主 `6379` -> 容器 `6379`
+
+常用覆盖项可以直接放在仓库根目录 `.env`，Docker Compose 会自动读取：
+
+```env
+APP_PORT=8080
+GIN_MODE=release
+MYSQL_ROOT_PASSWORD=password
+MYSQL_DATABASE=oopz
+MYSQL_PORT=3307
+REDIS_PORT=6379
+REDIS_PASSWORD=
+AUTH_SECRET=replace-with-a-strong-random-secret
+EMAIL_ENABLED=false
+WEBRTC_STUN_URLS=stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302
+WEBRTC_TURN_URLS=
+WEBRTC_TURN_USERNAME=
+WEBRTC_TURN_CREDENTIAL=
+```
+
+后端启动时会执行 `GORM AutoMigrate` 并补默认域、频道等种子数据，不需要手动导入 SQL。生产环境请至少替换 `AUTH_SECRET`、`MYSQL_ROOT_PASSWORD`，并按需要配置 TURN。
+
+停止服务：
+
+```bash
+docker compose down
+```
+
+清空本地 MySQL / Redis 数据卷：
+
+```bash
+docker compose down -v
 ```
 
 ## 本地开发
 
 ### 1. 启动依赖
 
+如果只想用本机 Go 和 Vite 开发，可以只启动 MySQL / Redis：
+
 ```bash
-docker compose up -d
+docker compose up -d mysql redis
 ```
 
 ### 2. 启动后端
@@ -153,24 +214,23 @@ npm install
 npm run dev
 ```
 
-前端开发环境默认采用“直连后端”模式（不经过 Vite 代理），请先配置：
+前端开发环境默认采用“直连后端”模式（不经过 Vite 代理），本地开发请配置到本机后端：
 
 ```bash
 cd frontend
-# Windows PowerShell 示例
-@"
-VITE_API_BASE_URL=https://oopz.xixiu.top
-VITE_WS_BASE_URL=wss://oopz.xixiu.top
-"@ | Set-Content .env.development
-```
-
-本地直连后端时可改成：
-
-```bash
 cat > .env.development <<'EOF'
 VITE_API_BASE_URL=http://localhost:8080
 VITE_WS_BASE_URL=ws://localhost:8080
 EOF
+```
+
+Windows PowerShell 示例：
+
+```powershell
+@"
+VITE_API_BASE_URL=http://localhost:8080
+VITE_WS_BASE_URL=ws://localhost:8080
+"@ | Set-Content .env.development
 ```
 
 如果你改过配置但浏览器仍命中旧地址，请先停止已有 `vite` 进程再重新执行 `npm run dev`。
@@ -211,9 +271,14 @@ http://localhost:8080
 常用环境变量如下：
 
 - `PORT`
+- `APP_PORT`（仅 Docker Compose 使用，用于映射宿主访问端口）
 - `MYSQL_DSN`
+- `MYSQL_ROOT_PASSWORD`（仅 Docker Compose 使用）
+- `MYSQL_DATABASE`（仅 Docker Compose 使用）
+- `MYSQL_PORT`（仅 Docker Compose 使用）
 - `REDIS_ADDR`
 - `REDIS_PASSWORD`
+- `REDIS_PORT`（仅 Docker Compose 使用）
 - `AUTH_SECRET`
 - `EMAIL_ENABLED`
 - `EMAIL_HOST`
@@ -491,25 +556,44 @@ sudo systemctl restart oopz-live
 
 ### Docker Compose 说明
 
-当前 `docker-compose.yml` 只负责本地 MySQL / Redis 依赖，不构建业务服务：
+`docker-compose.yml` 默认启动完整应用栈：
 
 ```bash
-docker compose up -d
+docker compose up --build -d
 docker compose ps
 ```
 
-默认端口：
+包含服务：
 
-- MySQL：宿主 `3307` -> 容器 `3306`
-- Redis：宿主 `6379` -> 容器 `6379`
+- `app`：Go 后端 + 已构建的 React 前端静态文件
+- `mysql`：MySQL 8.4，持久化到 `mysql84_data` volume
+- `redis`：Redis 7.4，持久化到 `redis_data` volume
 
-可通过环境变量覆盖：
+如果只是本地开发依赖，不想启动业务容器，可以只启动：
 
 ```bash
-MYSQL_ROOT_PASSWORD=strong-password MYSQL_PORT=3306 REDIS_PORT=6380 docker compose up -d
+docker compose up -d mysql redis
 ```
 
-如果使用默认 Compose 配置，本地后端 `.env` 里的 DSN 应为：
+Compose 读取根目录 `.env`。下面是一个最小生产化示例：
+
+```env
+APP_PORT=8080
+GIN_MODE=release
+MYSQL_ROOT_PASSWORD=replace-with-strong-password
+MYSQL_DATABASE=oopz
+MYSQL_PORT=3307
+REDIS_PORT=6379
+REDIS_PASSWORD=replace-with-redis-password
+AUTH_SECRET=replace-with-a-strong-random-secret
+EMAIL_ENABLED=false
+WEBRTC_STUN_URLS=stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302
+WEBRTC_TURN_URLS=turn:turn.example.com:3478,turn:turn.example.com:3478?transport=tcp
+WEBRTC_TURN_USERNAME=replace-with-turn-username
+WEBRTC_TURN_CREDENTIAL=replace-with-turn-credential
+```
+
+如果使用 `docker compose up -d mysql redis` 只跑依赖，本机后端 `.env` 里的 DSN 应连接宿主映射端口：
 
 ```env
 MYSQL_DSN=root:password@tcp(127.0.0.1:3307)/oopz?parseTime=true&multiStatements=true

@@ -1,9 +1,39 @@
 name: oopz-live
 
 services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: oopz-live:local
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      PORT: 8080
+      GIN_MODE: ${GIN_MODE:-release}
+      MYSQL_DSN: root:${MYSQL_ROOT_PASSWORD:-password}@tcp(mysql:3306)/${MYSQL_DATABASE:-oopz}?parseTime=true&multiStatements=true
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      AUTH_SECRET: ${AUTH_SECRET:-oopz-dev-secret-change-me}
+      EMAIL_ENABLED: ${EMAIL_ENABLED:-false}
+      EMAIL_HOST: ${EMAIL_HOST:-}
+      EMAIL_PORT: ${EMAIL_PORT:-587}
+      EMAIL_USER: ${EMAIL_USER:-}
+      EMAIL_PASSWORD: ${EMAIL_PASSWORD:-}
+      EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-Oopz Live}
+      WEBRTC_STUN_URLS: ${WEBRTC_STUN_URLS:-stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302}
+      WEBRTC_TURN_URLS: ${WEBRTC_TURN_URLS:-}
+      WEBRTC_TURN_USERNAME: ${WEBRTC_TURN_USERNAME:-}
+      WEBRTC_TURN_CREDENTIAL: ${WEBRTC_TURN_CREDENTIAL:-}
+    ports:
+      - "${APP_PORT:-8080}:8080"
+
   mysql:
     image: mysql:8.4
-    container_name: oopz-mysql
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-password}
@@ -23,15 +53,23 @@ services:
 
   redis:
     image: redis:7.4
-    container_name: oopz-redis
     restart: unless-stopped
     ports:
       - "${REDIS_PORT:-6379}:6379"
-    command: ["redis-server", "--save", "60", "1"]
+    command:
+      - sh
+      - -c
+      - |
+        if [ -n "$$REDIS_PASSWORD" ]; then
+          exec redis-server --save 60 1 --requirepass "$$REDIS_PASSWORD"
+        fi
+        exec redis-server --save 60 1
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "if [ -n \"$${REDIS_PASSWORD}\" ]; then redis-cli -a \"$${REDIS_PASSWORD}\" ping; else redis-cli ping; fi"]
       interval: 10s
       timeout: 5s
       retries: 10

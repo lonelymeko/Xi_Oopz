@@ -25,11 +25,8 @@ function trimTrailingSlash(value: string): string {
  */
 function normalizeApiBaseUrl(rawValue: string): string {
   const value = trimTrailingSlash(rawValue.trim());
-  if (!value && !isStrictRuntime()) {
-    return "";
-  }
   if (!value) {
-    throw new Error("缺少环境变量 VITE_API_BASE_URL，请配置后重启前端。");
+    return "";
   }
   if (!/^https?:\/\//i.test(value)) {
     throw new Error(`VITE_API_BASE_URL 非法：${value}，必须以 http:// 或 https:// 开头。`);
@@ -42,6 +39,10 @@ function normalizeApiBaseUrl(rawValue: string): string {
  */
 function deriveWsBaseUrlFromApi(apiBaseUrl: string): string {
   if (!apiBaseUrl) {
+    if (typeof window !== "undefined" && window.location?.host) {
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      return `${protocol}//${window.location.host}`;
+    }
     return "";
   }
   if (apiBaseUrl.startsWith("https://")) {

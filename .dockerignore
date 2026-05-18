@@ -1,0 +1,12 @@
+.git
+.cache
+frontend/dist
+frontend/node_modules
+node_modules
+release
+tmp
+*.log
+.env
+frontend/.env
+.DS_Store
+deploy/.DS_Store
