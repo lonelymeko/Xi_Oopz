@@ -31,6 +31,7 @@ var upgrader = websocket.Upgrader{
 const (
 	disconnectCleanupGrace = 12 * time.Second
 	manualCloseCode        = 4000
+	defaultScreeningTitle  = "无标题"
 )
 
 type pendingDisconnectedMembership struct {
@@ -918,7 +919,7 @@ func (h *Hub) replaceScreeningURL(client *Client, payload ScreeningReplacePayloa
 	state.ControllerUserID = client.user.ID
 	state.CurrentItemID = fmt.Sprintf("%d-%d", client.user.ID, now.UnixMilli())
 	state.CurrentURL = strings.TrimSpace(payload.URL)
-	state.CurrentTitle = strings.TrimSpace(payload.Title)
+	state.CurrentTitle = normalizeScreeningTitle(payload.Title)
 	state.PlaybackState = "loading"
 	state.CurrentTime = 0
 	state.PlaybackRate = 1
@@ -942,7 +943,7 @@ func (h *Hub) addScreeningURL(client *Client, payload ScreeningAddPayload) error
 	item := models.ScreeningPlaylistItem{
 		ItemID:  fmt.Sprintf("%d-%d", client.user.ID, time.Now().UTC().UnixMilli()),
 		URL:     strings.TrimSpace(payload.URL),
-		Title:   strings.TrimSpace(payload.Title),
+		Title:   normalizeScreeningTitle(payload.Title),
 		AddedBy: client.user.ID,
 		AddedAt: time.Now().UTC(),
 	}
@@ -1107,6 +1108,14 @@ func (h *Hub) advanceScreeningPlaylist(client *Client, channelID int64) error {
 		return err
 	}
 	return h.broadcastScreeningSnapshot(channelID)
+}
+
+func normalizeScreeningTitle(title string) string {
+	value := strings.TrimSpace(title)
+	if value == "" {
+		return defaultScreeningTitle
+	}
+	return value
 }
 
 func (h *Hub) updatePresence(client *Client) {
