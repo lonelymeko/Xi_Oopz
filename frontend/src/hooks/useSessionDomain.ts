@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, type MutableRefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
 
 import { liveFacade } from "../services/liveFacade";
 import { clearSession, saveSession } from "../services/session";
@@ -240,6 +240,16 @@ export function useSessionDomain(options: UseSessionDomainOptions) {
             if (presence.onlineCounts) {
               setOnlineCounts({ ...data.onlineCounts, ...presence.onlineCounts });
             }
+            if (presence.voiceMembers) {
+              setVoiceChannelMembers(presence.voiceMembers);
+            }
+            if (presence.screeningMembers) {
+              const nextScreening: Record<string, User[]> = {};
+              for (const [channelId, viewers] of Object.entries(presence.screeningMembers)) {
+                nextScreening[channelId] = viewers.map((v) => v.user);
+              }
+              setScreeningChannelMembers(nextScreening);
+            }
           } catch {
             // presence fetch failure is non-fatal
           }
@@ -284,6 +294,79 @@ export function useSessionDomain(options: UseSessionDomainOptions) {
       showError,
     ],
   );
+
+  /**
+   * 定时轮询在线状态，更新成员列表与在线计数。
+   */
+  useEffect(() => {
+    if (!session || !bootstrap) return;
+    const domainId = bootstrap.domain.id;
+    const token = session.token;
+    let active = true;
+
+    const poll = async () => {
+      try {
+        const presence: DomainPresenceResponse = await liveFacade.fetchDomainPresence(domainId, token);
+        if (!active) return;
+        const nextOnlineUsers = new Map<number, OnlineUserPresence>();
+        for (const entry of presence.onlineUsers || []) {
+          nextOnlineUsers.set(entry.user.id, entry);
+        }
+        setOnlineUsers(nextOnlineUsers);
+        if (presence.onlineCounts) {
+          setOnlineCounts(presence.onlineCounts);
+        }
+        if (presence.voiceMembers) {
+          setVoiceChannelMembers(presence.voiceMembers);
+        }
+        if (presence.screeningMembers) {
+          const nextScreening: Record<string, User[]> = {};
+          for (const [channelId, viewers] of Object.entries(presence.screeningMembers)) {
+            nextScreening[channelId] = viewers.map((v) => v.user);
+          }
+          setScreeningChannelMembers(nextScreening);
+        }
+      } catch {
+        // 轮询失败静默忽略
+      }
+    };
+
+    const interval = setInterval(poll, 5_000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [session, bootstrap, setOnlineUsers, setOnlineCounts, setVoiceChannelMembers, setScreeningChannelMembers]);
+
+  /**
+   * 手动刷新在线状态（供实时事件触发时调用）。
+   */
+  const refreshPresence = useCallback(async () => {
+    if (!session || !bootstrap) return;
+    try {
+      const presence: DomainPresenceResponse = await liveFacade.fetchDomainPresence(bootstrap.domain.id, session.token);
+      const nextOnlineUsers = new Map<number, OnlineUserPresence>();
+      for (const entry of presence.onlineUsers || []) {
+        nextOnlineUsers.set(entry.user.id, entry);
+      }
+      setOnlineUsers(nextOnlineUsers);
+      if (presence.onlineCounts) {
+        setOnlineCounts(presence.onlineCounts);
+      }
+      if (presence.voiceMembers) {
+        setVoiceChannelMembers(presence.voiceMembers);
+      }
+      if (presence.screeningMembers) {
+        const nextScreening: Record<string, User[]> = {};
+        for (const [channelId, viewers] of Object.entries(presence.screeningMembers)) {
+          nextScreening[channelId] = viewers.map((v) => v.user);
+        }
+        setScreeningChannelMembers(nextScreening);
+      }
+    } catch {
+      // 刷新失败静默忽略
+    }
+  }, [bootstrap, session, setOnlineCounts, setOnlineUsers, setScreeningChannelMembers, setVoiceChannelMembers]);
 
   /**
    * 提交登录/注册动作。
@@ -554,5 +637,6 @@ export function useSessionDomain(options: UseSessionDomainOptions) {
     submitCreateDomain,
     submitCreateChannel,
     logout,
+    refreshPresence,
   };
 }

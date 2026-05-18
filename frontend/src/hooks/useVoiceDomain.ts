@@ -43,6 +43,7 @@ type UseVoiceDomainOptions = {
   showError: (error: unknown, title: string, fallback: string) => string;
   resolveErrorMessage: (error: unknown, fallback: string) => string;
   voiceLog: (label: string, extra?: Record<string, unknown>) => void;
+  refreshPresence: () => Promise<void>;
 };
 
 /**
@@ -85,6 +86,7 @@ export function useVoiceDomain(options: UseVoiceDomainOptions) {
     showError,
     resolveErrorMessage,
     voiceLog,
+    refreshPresence,
   } = options;
 
   /**
@@ -157,6 +159,7 @@ export function useVoiceDomain(options: UseVoiceDomainOptions) {
       setLocalScreenStream(null);
       setMaximizedScreenKey(null);
       setStatus("已离开语音房");
+      void refreshPresence();
     } finally {
       voiceLeaveInFlightRef.current = false;
     }

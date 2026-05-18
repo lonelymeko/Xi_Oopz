@@ -30,6 +30,7 @@ type UseScreeningDomainOptions = {
   showError: (error: unknown, title: string, fallback: string) => string;
   screeningLog: (label: string, extra?: Record<string, unknown>) => void;
   leaveVoice: () => Promise<void>;
+  refreshPresence: () => Promise<void>;
 };
 
 /**
@@ -57,6 +58,7 @@ export function useScreeningDomain(options: UseScreeningDomainOptions) {
     showError,
     screeningLog,
     leaveVoice,
+    refreshPresence,
   } = options;
 
   /**
@@ -76,6 +78,7 @@ export function useScreeningDomain(options: UseScreeningDomainOptions) {
     setScreeningSnapshot(null);
     setScreeningJoinEpoch((value) => value + 1);
     setActiveChannel(nextActive);
+    void refreshPresence();
     await Promise.resolve();
     if (currentVoiceChannelIdRef.current) {
       await leaveVoice();
