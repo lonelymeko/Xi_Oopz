@@ -93,6 +93,7 @@ export function LivePage() {
   const leaveTraceRef = useRef<{ id: number; startedAt: number; channelId: number | null } | null>(null);
   const voiceTraceCounterRef = useRef(0);
   const activeChannelIdRef = useRef<number | null>(null);
+  const activeScreeningChannelIdRef = useRef<number | null>(null);
   const activeChannelRef = useRef<Channel | null>(null);
   const currentVoiceChannelIdRef = useRef<number | null>(null);
   const voiceMembersRef = useRef<Map<number, PresenceMember>>(new Map());
@@ -144,6 +145,7 @@ export function LivePage() {
     submitCreateDomain,
     submitCreateChannel,
     logout,
+    refreshPresence,
   } = useSessionDomain({
     session,
     bootstrap,
@@ -210,6 +212,10 @@ export function LivePage() {
     maximizedScreenKey,
   });
 
+  useEffect(() => {
+    activeScreeningChannelIdRef.current = activeScreeningChannel?.id || null;
+  }, [activeScreeningChannel?.id]);
+
   const {
     joinVoice,
     leaveVoice,
@@ -257,6 +263,7 @@ export function LivePage() {
     showError,
     resolveErrorMessage,
     voiceLog,
+    refreshPresence,
   });
 
   const { leaveScreeningChannel, toggleScreenShare, confirmScreenShare } = useScreeningDomain({
@@ -280,6 +287,7 @@ export function LivePage() {
     showError,
     screeningLog,
     leaveVoice,
+    refreshPresence,
   });
 
   const { selectChannel, sendMessage, appendEmoji, enterVoiceChannel } = useChannelDomain({
@@ -392,6 +400,7 @@ export function LivePage() {
     activeChannelIdRef,
     activeChannelRef,
     currentVoiceChannelIdRef,
+    activeScreeningChannelIdRef,
     voiceJoinInFlightRef,
     voiceMembersRef,
     currentUserRef,
@@ -414,6 +423,7 @@ export function LivePage() {
     pushNotice,
     voiceLog,
     screeningLog,
+    refreshPresence,
   });
 
   useEffect(() => {

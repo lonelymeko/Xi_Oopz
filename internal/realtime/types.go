@@ -28,10 +28,10 @@ type OnlineUserPresence struct {
 }
 
 type DomainPresenceSnapshot struct {
-	OnlineUsers      []OnlineUserPresence         `json:"onlineUsers"`
-	VoiceMembers     map[string][]PresenceMember  `json:"voiceMembers"`
+	OnlineUsers      []OnlineUserPresence                `json:"onlineUsers"`
+	VoiceMembers     map[string][]PresenceMember         `json:"voiceMembers"`
 	ScreeningMembers map[string][]models.ScreeningViewer `json:"screeningMembers"`
-	OnlineCounts     map[string]int64             `json:"onlineCounts"`
+	OnlineCounts     map[string]int64                    `json:"onlineCounts"`
 }
 
 type ChannelJoinPayload struct {
@@ -40,6 +40,11 @@ type ChannelJoinPayload struct {
 
 type ChannelLeavePayload struct {
 	ChannelID int64 `json:"channelId"`
+}
+
+type SessionLeavePayload struct {
+	ChannelID          int64 `json:"channelId"`
+	ScreeningChannelID int64 `json:"screeningChannelId"`
 }
 
 type ChatSendPayload struct {

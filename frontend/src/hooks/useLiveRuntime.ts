@@ -21,6 +21,7 @@ type UseLiveRuntimeOptions = {
   activeChannelIdRef: MutableRefObject<number | null>;
   activeChannelRef: MutableRefObject<import("../types").Channel | null>;
   currentVoiceChannelIdRef: MutableRefObject<number | null>;
+  activeScreeningChannelIdRef: MutableRefObject<number | null>;
   voiceJoinInFlightRef: MutableRefObject<number | null>;
   voiceMembersRef: MutableRefObject<Map<number, PresenceMember>>;
   currentUserRef: MutableRefObject<import("../types").User | null>;
@@ -61,6 +62,7 @@ export function useLiveRuntime(options: UseLiveRuntimeOptions) {
     activeChannelIdRef,
     activeChannelRef,
     currentVoiceChannelIdRef,
+    activeScreeningChannelIdRef,
     voiceJoinInFlightRef,
     voiceMembersRef,
     currentUserRef,
@@ -320,10 +322,17 @@ export function useLiveRuntime(options: UseLiveRuntimeOptions) {
 
     return () => {
       const voiceChannelId = currentVoiceChannelIdRef.current;
+      const screeningChannelId = activeScreeningChannelIdRef.current;
       if (voiceChannelId) {
         void rtcRef.current?.leaveVoice();
       }
-      socket.close(voiceChannelId ? { type: "channel.leave", payload: { channelId: voiceChannelId } } : undefined);
+      socket.close({
+        type: "session.leave",
+        payload: {
+          channelId: voiceChannelId,
+          screeningChannelId,
+        },
+      });
       socketRef.current = null;
       rtcRef.current = null;
       setPeerDiagnostics(new Map());
@@ -335,6 +344,7 @@ export function useLiveRuntime(options: UseLiveRuntimeOptions) {
     sessionToken,
     userId,
     currentVoiceChannelIdRef,
+    activeScreeningChannelIdRef,
     currentUserRef,
     membersRef,
     voiceMembersRef,

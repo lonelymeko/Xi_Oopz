@@ -230,7 +230,7 @@ func (h *Hub) unregister(client *Client) {
 
 	if client.manualClose {
 		h.removeUserFromAllVoiceChannels(client.user.ID, 0)
-		h.removeUserFromAllScreeningRooms(client.user.ID, 0)
+		h.removeUserFromAllScreeningRooms(client.user.ID, 0, screeningChannelID)
 		h.removeDomainUser(client.user.ID)
 	} else if remainingClients == 0 {
 		h.scheduleDisconnectedUserCleanup(client.user.ID, client.domainID, voiceChannelID, screeningChannelID, client.micEnabled, client.screenSharing)
@@ -268,7 +268,7 @@ func (h *Hub) scheduleDisconnectedUserCleanup(userID, domainID, voiceChannelID, 
 
 		log.Printf("[realtime] disconnected cleanup user=%d voice_channel=%d screening_channel=%d grace=%s", userID, voiceChannelID, screeningChannelID, disconnectCleanupGrace)
 		h.removeUserFromAllVoiceChannels(userID, 0)
-		h.removeUserFromAllScreeningRooms(userID, 0)
+		h.removeUserFromAllScreeningRooms(userID, 0, screeningChannelID)
 		h.removeDomainUser(userID)
 	})
 
@@ -401,6 +401,19 @@ func (h *Hub) Handle(client *Client, raw []byte) {
 		log.Printf("[voice-backend] channel.leave received user=%d domain=%d channel=%d", client.user.ID, client.domainID, client.currentChannelID)
 		h.leaveChannel(client, true)
 		log.Printf("[voice-backend] channel.leave completed user=%d elapsed_ms=%d", client.user.ID, time.Since(eventStartedAt).Milliseconds())
+	case "session.leave":
+		var payload SessionLeavePayload
+		if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+			client.sendJSON("error", map[string]string{"message": "invalid session.leave payload"})
+			return
+		}
+		if payload.ChannelID != 0 && client.currentChannelID == payload.ChannelID {
+			h.leaveChannel(client, true)
+		}
+		if payload.ScreeningChannelID != 0 {
+			h.leaveScreening(client, payload.ScreeningChannelID)
+		}
+		client.manualClose = true
 	case "chat.send":
 		var payload ChatSendPayload
 		if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
@@ -686,7 +699,7 @@ func (h *Hub) joinScreening(client *Client, channelID int64) error {
 	if previousScreeningChannelID != 0 {
 		h.leaveScreening(client, previousScreeningChannelID)
 	}
-	h.removeUserFromAllScreeningRooms(client.user.ID, channelID)
+	h.removeUserFromAllScreeningRooms(client.user.ID, channelID, 0)
 
 	h.mu.Lock()
 	client.currentScreeningChannelID = channelID
@@ -816,8 +829,9 @@ func (h *Hub) removeUserFromAllVoiceChannels(userID, exceptChannelID int64) {
 	}
 }
 
-func (h *Hub) removeUserFromAllScreeningRooms(userID, exceptChannelID int64) {
+func (h *Hub) removeUserFromAllScreeningRooms(userID, exceptChannelID int64, knownChannelIDs ...int64) {
 	var staleChannels []int64
+	staleSet := map[int64]struct{}{}
 
 	h.mu.Lock()
 	for channelID, clients := range h.screeningClients {
@@ -839,10 +853,20 @@ func (h *Hub) removeUserFromAllScreeningRooms(userID, exceptChannelID int64) {
 			delete(h.screeningClients, channelID)
 		}
 		if removed {
-			staleChannels = append(staleChannels, channelID)
+			staleSet[channelID] = struct{}{}
 		}
 	}
 	h.mu.Unlock()
+
+	for _, channelID := range knownChannelIDs {
+		if channelID == 0 || channelID == exceptChannelID {
+			continue
+		}
+		staleSet[channelID] = struct{}{}
+	}
+	for channelID := range staleSet {
+		staleChannels = append(staleChannels, channelID)
+	}
 
 	for _, channelID := range staleChannels {
 		log.Printf("[screening-backend] cleanup stale screening membership user=%d removed_channel=%d keep_channel=%d", userID, channelID, exceptChannelID)
