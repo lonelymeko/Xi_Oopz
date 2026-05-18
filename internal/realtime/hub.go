@@ -950,15 +950,7 @@ func (h *Hub) addScreeningURL(client *Client, payload ScreeningAddPayload) error
 	if err := h.pushScreeningPlaylistItem(payload.ChannelID, item); err != nil {
 		return err
 	}
-	playlist, err := h.loadScreeningPlaylist(payload.ChannelID)
-	if err != nil {
-		return err
-	}
-	h.broadcastToScreening(payload.ChannelID, "screening.playlist.updated", map[string]any{
-		"channelId": payload.ChannelID,
-		"playlist":  playlist,
-	}, nil)
-	return nil
+	return h.broadcastScreeningPlaylist(payload.ChannelID)
 }
 
 func (h *Hub) updateScreeningPlayback(client *Client, eventType string, payload ScreeningPlaybackPayload, readyOnly bool) error {
@@ -1089,6 +1081,9 @@ func (h *Hub) advanceScreeningPlaylist(client *Client, channelID int64) error {
 		if err := h.saveScreeningState(channelID, state); err != nil {
 			return err
 		}
+		if err := h.broadcastScreeningPlaylist(channelID); err != nil {
+			return err
+		}
 		return h.broadcastScreeningSnapshot(channelID)
 	}
 	state.CurrentItemID = nextItem.ItemID
@@ -1105,6 +1100,9 @@ func (h *Hub) advanceScreeningPlaylist(client *Client, channelID int64) error {
 		return err
 	}
 	if err := h.resetScreeningViewerReady(channelID); err != nil {
+		return err
+	}
+	if err := h.broadcastScreeningPlaylist(channelID); err != nil {
 		return err
 	}
 	return h.broadcastScreeningSnapshot(channelID)
@@ -1382,6 +1380,18 @@ func (h *Hub) broadcastScreeningSnapshot(channelID int64) error {
 	}
 	log.Printf("[screening-backend] snapshot channel=%d item=%s url=%s controller=%d viewers=%d playlist=%d", channelID, snapshot.State.CurrentItemID, snapshot.State.CurrentURL, snapshot.State.ControllerUserID, len(snapshot.Viewers), len(snapshot.Playlist))
 	h.broadcastToScreening(channelID, "screening.snapshot", snapshot, nil)
+	return nil
+}
+
+func (h *Hub) broadcastScreeningPlaylist(channelID int64) error {
+	playlist, err := h.loadScreeningPlaylist(channelID)
+	if err != nil {
+		return err
+	}
+	h.broadcastToScreening(channelID, "screening.playlist.updated", map[string]any{
+		"channelId": channelID,
+		"playlist":  playlist,
+	}, nil)
 	return nil
 }
 

@@ -213,6 +213,11 @@ export function useLiveRuntime(options: UseLiveRuntimeOptions) {
           void refreshPresence();
           break;
         }
+        case "screening.playlist.updated": {
+          const playlistPayload = payload as SocketEventMap["screening.playlist.updated"];
+          setScreeningSnapshot((prev) => (prev ? { ...prev, playlist: playlistPayload.playlist || [] } : prev));
+          break;
+        }
         case "screening.play":
         case "screening.pause":
         case "screening.seek":
