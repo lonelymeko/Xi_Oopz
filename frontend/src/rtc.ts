@@ -42,41 +42,6 @@ export type ScreenShareOptions = {
   surface: ScreenShareSurface;
   audioMode: ScreenAudioMode;
 };
-const RTC_DEBUG_LABELS = new Set([
-  "joinVoice:start",
-  "joinVoice:audio-ready",
-  "joinVoice:channel.join-sent",
-  "leaveVoice:start",
-  "leaveVoice:completed",
-  "ensureAudio:getUserMedia:start",
-  "ensureAudio:reused-prewarmed-stream",
-  "ensureAudio:getUserMedia:completed",
-  "refreshAudioInput:start",
-  "refreshAudioInput:completed",
-  "acquireAudioStream:advanced:start",
-  "acquireAudioStream:advanced:completed",
-  "acquireAudioStream:advanced:failed",
-  "acquireAudioStream:fallback:start",
-  "acquireAudioStream:fallback:completed",
-  "acquireAudioStream:fallback:failed",
-  "peer:created",
-  "ice:config",
-  "ice:candidate",
-  "ice:gathering-complete",
-  "ice:no-usable-pair",
-  "ice:selected-pair",
-  "track:received",
-  "negotiate:start",
-  "negotiate:offer-sent",
-  "reconnect:scheduled",
-  "reconnect:ice-restart",
-  "reconnect:recreate",
-  "reconnect:reset-received",
-  "signal:offer:ignored",
-  "signal:answer:ignored",
-  "signal:error",
-]);
-
 export class RTCController {
   private static readonly MEDIA_RECONNECT_DELAY_MS = 1500;
   private static readonly MEDIA_RECONNECT_MAX_ATTEMPTS = 5;
@@ -114,17 +79,7 @@ export class RTCController {
   private screenSourceNode: MediaStreamAudioSourceNode | null = null;
   private screenGainNode: GainNode | null = null;
 
-  private log(label: string, extra?: Record<string, unknown>) {
-    if (!RTC_DEBUG_LABELS.has(label)) {
-      return;
-    }
-    const stamp = new Date().toISOString();
-    if (extra) {
-      console.info(`[rtc][${stamp}] ${label}`, extra);
-      return;
-    }
-    console.info(`[rtc][${stamp}] ${label}`);
-  }
+  private log(_label: string, _extra?: Record<string, unknown>) {}
 
   constructor(
     private readonly socket: SocketClient,
