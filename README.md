@@ -291,6 +291,7 @@ http://localhost:8080
 - `WEBRTC_TURN_URLS`
 - `WEBRTC_TURN_USERNAME`
 - `WEBRTC_TURN_CREDENTIAL`
+- `WEBRTC_ICE_SERVERS_JSON`
 
 ### WebRTC ICE 环境变量示例
 
@@ -301,6 +302,14 @@ WEBRTC_TURN_URLS=
 WEBRTC_TURN_USERNAME=
 WEBRTC_TURN_CREDENTIAL=
 ```
+
+如果需要多组 TURN 域名/密钥，可以用 `WEBRTC_ICE_SERVERS_JSON` 直接覆盖完整 ICE server 列表：
+
+```env
+WEBRTC_ICE_SERVERS_JSON=[{"urls":"stun:stun.l.google.com:19302"},{"urls":["turn:turn-a.example.com:3478?transport=udp","turn:turn-a.example.com:3478?transport=tcp","turns:turn-a.example.com:443?transport=tcp"],"username":"replace-with-user-a","credential":"replace-with-pass-a","credentialType":"password"},{"urls":["turn:turn-b.example.com:3478?transport=udp","turns:turn-b.example.com:5349?transport=tcp"],"username":"replace-with-user-b","credential":"replace-with-pass-b","credentialType":"password"}]
+```
+
+设置 `WEBRTC_ICE_SERVERS_JSON` 后，会优先使用它；旧的 `WEBRTC_STUN_URLS` / `WEBRTC_TURN_URLS` 单组配置会被忽略。
 
 生产环境请通过密钥系统或部署环境变量注入 TURN 凭据，避免把凭据写入代码仓库。
 
@@ -628,8 +637,16 @@ REDIS_ADDR=127.0.0.1:6379
 - `WEBRTC_STUN_URLS`：逗号分隔的 STUN 地址列表。
 - `WEBRTC_TURN_URLS`：逗号分隔的 TURN 地址列表。
 - `WEBRTC_TURN_USERNAME` / `WEBRTC_TURN_CREDENTIAL`：TURN 凭据。
+- `WEBRTC_ICE_SERVERS_JSON`：完整 ICE server JSON 列表；适合多组 TURN 域名/密钥，设置后优先于上面的单组配置。
 
 公开部署建议必须配置自己的 TURN 服务，尤其是手机流量、校园网、公司网、跨运营商网络等场景。TURN 凭据不要写死到前端源码或 README 示例里，生产环境应放在服务器环境变量、systemd `EnvironmentFile` 或密钥系统中。
+
+本地探测结果（2026-05-19，使用真实 Chromium/Edge `RTCPeerConnection`，`iceTransportPolicy: relay`）：
+
+- 可用 TURN：Xirsys `us-turn8.xirsys.com` 的 `udp:80`、`udp:3478`、`tcp:80`、`tcp:3478`、`turns:443/tcp`、`turns:5349/tcp` 都拿到了 relay candidate。
+- 可用 STUN：Google STUN、Xirsys STUN、`turn.dbase.in.rs` STUN 能拿到 srflx candidate。
+- 未拿到 relay：`numb.viagenie.ca`、`turn1.webrtc.tools:80?transport=udp`、`globalturn.subspace.com` 这几组在当前网络下失败或域名解析失败。
+- Cloudflare TURN 只给了 API 文档，没有具体 `key_id` / `key_secret`，暂时无法生成临时凭据探测。
 
 ## 当前实现说明
 

@@ -63,3 +63,31 @@ func TestWebRTCIceServers(t *testing.T) {
 		t.Fatalf("unexpected turn auth fields: %#v", last)
 	}
 }
+
+// TestWebRTCIceServersJSON 验证 JSON 配置可以表达多组 ICE server。
+func TestWebRTCIceServersJSON(t *testing.T) {
+	cfg := Config{
+		WebRTCIceServersJSON: `[
+			{"urls":"stun:stun.example.com:19302"},
+			{
+				"urls":["turn:turn-a.example.com:3478?transport=udp","turns:turn-a.example.com:443?transport=tcp"],
+				"username":"user-a",
+				"credential":"pass-a",
+				"credentialType":"password"
+			},
+			{"urls":[]}
+		]`,
+		WebRTCStunURLs: []string{"stun:fallback.example.com:19302"},
+	}
+
+	servers := cfg.WebRTCIceServers()
+	if len(servers) != 2 {
+		t.Fatalf("expected two valid JSON ice servers, got %d: %#v", len(servers), servers)
+	}
+	if servers[0]["urls"] != "stun:stun.example.com:19302" {
+		t.Fatalf("unexpected stun server: %#v", servers[0])
+	}
+	if servers[1]["username"] != "user-a" || servers[1]["credentialType"] != "password" {
+		t.Fatalf("unexpected turn server fields: %#v", servers[1])
+	}
+}
