@@ -473,6 +473,15 @@ func (h *Hub) Handle(client *Client, raw []byte) {
 		if err := h.addScreeningURL(client, payload); err != nil {
 			client.sendJSON("error", map[string]string{"message": err.Error()})
 		}
+	case "screening.url.remove":
+		var payload ScreeningRemovePayload
+		if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+			client.sendJSON("error", map[string]string{"message": "invalid screening.url.remove payload"})
+			return
+		}
+		if err := h.removeScreeningURL(client, payload); err != nil {
+			client.sendJSON("error", map[string]string{"message": err.Error()})
+		}
 	case "screening.controller.ready":
 		var payload ScreeningPlaybackPayload
 		if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
@@ -953,6 +962,16 @@ func (h *Hub) addScreeningURL(client *Client, payload ScreeningAddPayload) error
 	return h.broadcastScreeningPlaylist(payload.ChannelID)
 }
 
+func (h *Hub) removeScreeningURL(client *Client, payload ScreeningRemovePayload) error {
+	if payload.ChannelID == 0 || strings.TrimSpace(payload.ItemID) == "" {
+		return fmt.Errorf("channelId and itemId are required")
+	}
+	if err := h.removeScreeningPlaylistItem(payload.ChannelID, strings.TrimSpace(payload.ItemID)); err != nil {
+		return err
+	}
+	return h.broadcastScreeningPlaylist(payload.ChannelID)
+}
+
 func (h *Hub) updateScreeningPlayback(client *Client, eventType string, payload ScreeningPlaybackPayload, readyOnly bool) error {
 	if payload.ChannelID == 0 {
 		return fmt.Errorf("channelId is required")
@@ -1317,6 +1336,23 @@ func (h *Hub) pushScreeningPlaylistItem(channelID int64, item models.ScreeningPl
 		return err
 	}
 	return h.rdb.RPush(ctx, h.screeningPlaylistKey(channelID), string(raw)).Err()
+}
+
+func (h *Hub) removeScreeningPlaylistItem(channelID int64, itemID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	key := h.screeningPlaylistKey(channelID)
+	items, err := h.rdb.LRange(ctx, key, 0, -1).Result()
+	if err != nil {
+		return err
+	}
+	for _, raw := range items {
+		var item models.ScreeningPlaylistItem
+		if json.Unmarshal([]byte(raw), &item) == nil && item.ItemID == itemID {
+			return h.rdb.LRem(ctx, key, 1, raw).Err()
+		}
+	}
+	return nil
 }
 
 func (h *Hub) loadScreeningPlaylist(channelID int64) ([]models.ScreeningPlaylistItem, error) {

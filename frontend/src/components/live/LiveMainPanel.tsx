@@ -84,6 +84,7 @@ export function LiveMainPanel(props: {
   sendMessage: (body: string) => Promise<void>;
   onScreeningReplace: (url: string, title: string) => void;
   onScreeningAppend: (url: string, title: string) => void;
+  onScreeningRemove: (itemId: string) => void;
   onScreeningPlaybackEvent: (type: string, payload: Record<string, unknown>) => void;
   onScreeningError: (title: string, message: string) => void;
 }) {
@@ -133,6 +134,7 @@ export function LiveMainPanel(props: {
     sendMessage,
     onScreeningReplace,
     onScreeningAppend,
+    onScreeningRemove,
     onScreeningPlaybackEvent,
     onScreeningError,
   } = props;
@@ -240,6 +242,12 @@ export function LiveMainPanel(props: {
             onPlaybackEvent={onScreeningPlaybackEvent}
             onError={onScreeningError}
           />
+        ) : null}
+
+        {activeScreeningChannel ? (
+          <div className="screening-playlist-mobile">
+            <ScreeningPlaylistSection playlist={screeningSnapshot?.playlist || []} onRemove={onScreeningRemove} />
+          </div>
         ) : null}
 
         <section className={`chat-panel ${activeScreeningChannel ? "chat-panel--screening" : ""}`}>
@@ -378,7 +386,7 @@ export function LiveMainPanel(props: {
         </div>
 
         <div className="member-list">
-          {activeScreeningChannel ? <ScreeningPlaylistSection playlist={screeningSnapshot?.playlist || []} /> : null}
+          {activeScreeningChannel ? <ScreeningPlaylistSection playlist={screeningSnapshot?.playlist || []} onRemove={onScreeningRemove} /> : null}
           {activeScreeningChannel ? (
             <MemberSection
               title={`${screeningViewerMembers.length} 人正在观看 ${activeScreeningChannel.name}`}

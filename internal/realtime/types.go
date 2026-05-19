@@ -93,6 +93,11 @@ type ScreeningAddPayload struct {
 	Title     string `json:"title"`
 }
 
+type ScreeningRemovePayload struct {
+	ChannelID int64  `json:"channelId"`
+	ItemID    string `json:"itemId"`
+}
+
 type ScreeningPlaybackPayload struct {
 	ChannelID    int64   `json:"channelId"`
 	ItemID       string  `json:"itemId"`

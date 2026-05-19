@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 
-import { PlayIcon } from "./icons";
+import { PlayIcon, TrashIcon } from "./icons";
 import type { ScreeningPlaylistItem, ScreeningSnapshot, User, Channel } from "../../types";
 import { isLikelyLiveScreeningURL } from "../../utils/live";
 import type { ScreeningPlayerElement } from "../../types/live";
@@ -69,12 +69,6 @@ export function ScreeningRoomPanel({
       lastLoadedItemRef.current = state.currentItemId;
       lastAppliedJoinEpochRef.current = joinEpoch;
       player.src = state.currentUrl || "";
-      console.info(`[screening-ui][${new Date().toISOString()}] screening:player:src-assigned`, {
-        channelId: state.channelId,
-        itemId: state.currentItemId,
-        currentUrl: state.currentUrl,
-        joinEpoch,
-      });
     } else if (!state.currentItemId && player.src) {
       player.src = "";
       lastLoadedItemRef.current = "";
@@ -158,16 +152,8 @@ export function ScreeningRoomPanel({
     if (!player) return;
 
     const logPlayerEvent = (eventName: string, extra?: Record<string, unknown>) => {
-      console.info(`[screening-ui][${new Date().toISOString()}] screening:player:${eventName}`, {
-        channelId: state?.channelId || channel.id,
-        itemId: state?.currentItemId || "",
-        currentUrl: state?.currentUrl || player.src || "",
-        playbackState: state?.playbackState || "idle",
-        currentTime: Number.isFinite(player.currentTime) ? player.currentTime : null,
-        paused: player.paused,
-        playbackRate: player.playbackRate || 1,
-        ...extra,
-      });
+      void eventName;
+      void extra;
     };
 
     const handleCanPlay = () => {
@@ -404,7 +390,13 @@ export function ScreeningRoomPanel({
 /**
  * 放映室播放列表组件。
  */
-export function ScreeningPlaylistSection({ playlist }: { playlist: ScreeningPlaylistItem[] }) {
+export function ScreeningPlaylistSection({
+  playlist,
+  onRemove,
+}: {
+  playlist: ScreeningPlaylistItem[];
+  onRemove: (itemId: string) => void;
+}) {
   return (
     <section className="member-section">
       <h4>{`播放列表 · ${playlist.length}`}</h4>
@@ -413,8 +405,19 @@ export function ScreeningPlaylistSection({ playlist }: { playlist: ScreeningPlay
           playlist.map((item, index) => (
             <div key={item.itemId} className="screening-playlist__item">
               <span>{index + 1}</span>
-              <div>
-                <strong>{item.title || item.url}</strong>
+              <div className="screening-playlist__content">
+                <div className="screening-playlist__title-row">
+                  <strong title={item.title || item.url}>{item.title || item.url}</strong>
+                  <button
+                    type="button"
+                    className="screening-playlist__delete"
+                    title="删除视频"
+                    aria-label={`删除 ${item.title || item.url}`}
+                    onClick={() => onRemove(item.itemId)}
+                  >
+                    <TrashIcon />
+                  </button>
+                </div>
                 <p>{item.url}</p>
               </div>
             </div>

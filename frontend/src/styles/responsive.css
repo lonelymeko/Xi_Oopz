@@ -60,6 +60,10 @@
   .member-sidebar {
     display: none;
   }
+
+  .screening-playlist-mobile {
+    display: block;
+  }
 }
 
 @media (max-width: 960px) {

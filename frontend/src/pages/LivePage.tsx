@@ -561,6 +561,10 @@ export function LivePage() {
           setScreeningUrlInput("");
           setScreeningTitleInput("");
         }}
+        onScreeningRemove={(itemId) => {
+          if (!activeScreeningChannel) return;
+          socketRef.current?.send("screening.url.remove", { channelId: activeScreeningChannel.id, itemId });
+        }}
         onScreeningPlaybackEvent={(type, payload) => {
           if (!activeScreeningChannel) return;
           socketRef.current?.send(type, { channelId: activeScreeningChannel.id, ...payload });

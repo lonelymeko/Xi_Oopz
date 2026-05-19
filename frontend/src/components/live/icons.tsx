@@ -300,3 +300,20 @@ export function ExpandIcon() {
     </svg>
   );
 }
+
+export function TrashIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4.5 6.5h15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M9.5 6.5V5a1.5 1.5 0 0 1 1.5-1.5h2A1.5 1.5 0 0 1 14.5 5v1.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+      <path
+        d="M7 6.5 7.8 19a2 2 0 0 0 2 1.8h4.4a2 2 0 0 0 2-1.8L17 6.5M10.5 10.5v6M13.5 10.5v6"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
