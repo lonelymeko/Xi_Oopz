@@ -25,6 +25,9 @@ describe("live utils", () => {
 
   it("应识别直播流地址", () => {
     expect(isLikelyLiveScreeningURL("https://live.bilibili.com/1")).toBe(true);
+    expect(isLikelyLiveScreeningURL("https://example.com/camera.flv")).toBe(true);
+    expect(isLikelyLiveScreeningURL("https://example.com/live/index.m3u8?stream=live")).toBe(true);
+    expect(isLikelyLiveScreeningURL("https://example.com/video/index.m3u8")).toBe(false);
     expect(isLikelyLiveScreeningURL("https://example.com/video.mp4")).toBe(false);
   });
 

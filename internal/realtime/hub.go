@@ -1069,8 +1069,9 @@ func isLikelyLiveScreeningURL(raw string) bool {
 	if value == "" {
 		return false
 	}
+	// HLS playlists are used for both live streams and VOD. Treat .m3u8 as
+	// on-demand unless the URL has an explicit live signal.
 	return strings.Contains(value, "live.bilibili.com") ||
-		strings.Contains(value, ".m3u8") ||
 		strings.Contains(value, ".flv") ||
 		strings.Contains(value, "stream=live") ||
 		strings.Contains(value, "livestream")

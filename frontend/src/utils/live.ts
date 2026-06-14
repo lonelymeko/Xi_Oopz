@@ -38,14 +38,14 @@ export function formatTime(value: string) {
 }
 
 /**
- * 判断 URL 是否可能为直播流地址。
+ * 判断 URL 是否明确指向直播流。
+ * HLS 的 .m3u8 既可用于直播也可用于点播，不能仅凭扩展名判定为直播。
  */
 export function isLikelyLiveScreeningURL(value?: string | null) {
   const raw = (value || "").trim().toLowerCase();
   if (!raw) return false;
   return (
     raw.includes("live.bilibili.com") ||
-    raw.includes(".m3u8") ||
     raw.includes(".flv") ||
     raw.includes("stream=live") ||
     raw.includes("livestream")
