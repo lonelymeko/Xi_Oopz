@@ -1,0 +1,23 @@
+name: oopz_flutter_client
+description: Xi_Oopz 移动端语音客户端 — 对标 web 端 WebRTC 机制，与 Go 后端信令协议互通。
+publish_to: "none"
+version: 0.1.0
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+  flutter: ">=3.19.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_webrtc: ^0.11.7
+  web_socket_channel: ^3.0.1
+  http: ^1.2.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

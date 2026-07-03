@@ -1,0 +1,1165 @@
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:flutter_webrtc/flutter_webrtc.dart';
+
+import 'socket_client.dart';
+import 'types.dart';
+
+/// 每个远端 peer 的连接包装，对标 rtc.ts 的 PeerWrapper。
+class PeerWrapper {
+  final OopzUser user;
+  final RTCPeerConnection pc;
+  final bool polite;
+  bool makingOffer = false;
+  bool ignoreOffer = false;
+  bool isSettingRemoteAnswerPending = false;
+  bool initialOfferOwner;
+  final List<Map<String, dynamic>> pendingIceCandidates = [];
+  final RTCRtpTransceiver audioTransceiver;
+  final RTCRtpTransceiver displayAudioTransceiver;
+  final RTCRtpTransceiver screenTransceiver;
+  int reconnectAttempts = 0;
+  Timer? reconnectTimer;
+  bool reconnecting = false;
+  final bool useRelayOnly;
+  TransportType lastKnownTransport;
+  Timer? statsTimer;
+  Timer? stableTimer;
+  final List<Timer> outboundRehydrateTimers = [];
+  final int createdAtMs;
+
+  PeerWrapper({
+    required this.user,
+    required this.pc,
+    required this.polite,
+    required this.initialOfferOwner,
+    required this.audioTransceiver,
+    required this.displayAudioTransceiver,
+    required this.screenTransceiver,
+    required this.useRelayOnly,
+    required this.lastKnownTransport,
+    required this.createdAtMs,
+  });
+}
+
+/// Flutter 版 RTCController，1:1 对标 frontend/src/rtc.ts 的机制：
+/// - Mesh 全互联，id 小的一方为 initialOfferOwner（impolite），完美协商防 glare
+/// - 三 transceiver：麦克风音频 / 屏幕共享音频 / 屏幕共享视频（与 Web 端 SDP 布局一致）
+/// - 断线重连梯子：宽限期 → ICE restart（仅直连）→ TURN relay 局部重建（rtc.reset）
+/// - 状态机加固：reset 对撞决胜 / 建连宽限期 / 重建预算+终态 / 通知去重
+/// - media.sync_request 补流循环、重连后 outbound rehydrate(replaceTrack null→track)
+///
+/// 与 Web 端的移动端差异：
+/// - 无 Web Audio 混音：麦克风轨直接挂 audioTransceiver；将来手机发屏幕音频时
+///   挂 displayAudioTransceiver（Web 端接收侧本就按第二条 audio transceiver 区分）
+/// - v1 不实现手机端屏幕共享“发送”（需 MediaProjection / Broadcast Extension），
+///   但完整实现“接收”远端屏幕共享
+class RTCController {
+  static const int mediaReconnectDelayMs = 1500;
+  static const int mediaReconnectMaxAttempts = 5;
+  static const int peerDisconnectGraceMs = 5000;
+  static const int peerReconnectDelayMs = 2000;
+  static const int peerReconnectMaxAttempts = 4;
+  static const int turnDisconnectGraceMs = 1000;
+  static const int iceRestartTimeoutMs = 4000;
+  static const int peerStatsIntervalMs = 3000;
+  static const int iceGatheringEvalDelayMs = 800;
+  static const int peerStableResetMs = 8000;
+  static const List<int> outboundRehydrateDelaysMs = [300, 1200];
+  static const int peerEstablishGraceMs = 8000;
+  static const int establishReevalDelayMs = 2000;
+  static const int resetGlareWindowMs = 3000;
+  static const int politeRecreateExtraDelayMs = 1500;
+  static const int maxPeerRebuilds = 3;
+  static const int outageNoticeIntervalMs = 30000;
+
+  final SocketClient socket;
+  final int? Function() getCurrentVoiceChannelId;
+  final OopzUser? Function() getCurrentUser;
+  final Map<int, PresenceMember> Function() getVoiceMembers;
+  final List<Map<String, dynamic>> Function() getIceServers;
+  final void Function(Map<int, RemoteMedia> media) onMediaChanged;
+  final void Function(Map<int, PeerDiagnostics> diagnostics) onDiagnosticsChanged;
+  final void Function(MediaStream? stream) onLocalAudioChanged;
+  final void Function(String kind, String title, String message) onNotice;
+
+  final Stopwatch _clock = Stopwatch()..start();
+
+  MediaStream? _localAudioStream;
+  bool _micEnabled = true;
+  bool _voiceSessionActive = false;
+
+  final Map<int, PeerWrapper> _peers = {};
+  final Map<int, Future<PeerWrapper>> _peerEnsureFutures = {};
+  final Map<int, RemoteMedia> _remoteMedia = {};
+  final Map<String, int> _mediaReconnectAttempts = {};
+  final Map<String, Timer> _mediaReconnectTimers = {};
+  final Map<int, Timer> _peerDisconnectTimers = {};
+  final Map<int, int> _peerRebuildCounts = {};
+  final Set<int> _failedPeers = {};
+  final Map<int, int> _lastResetSentAt = {};
+  final Map<int, int> _outageNoticeAt = {};
+  final Map<int, PeerDiagnostics> _diagnostics = {};
+
+  RTCController({
+    required this.socket,
+    required this.getCurrentVoiceChannelId,
+    required this.getCurrentUser,
+    required this.getVoiceMembers,
+    required this.getIceServers,
+    required this.onMediaChanged,
+    required this.onDiagnosticsChanged,
+    required this.onLocalAudioChanged,
+    required this.onNotice,
+  });
+
+  int get _nowMs => _clock.elapsedMilliseconds;
+
+  bool get micEnabled => _micEnabled;
+
+  // ------------------------------------------------------------------
+  // 生命周期
+  // ------------------------------------------------------------------
+
+  Future<void> joinVoice(int channelId) async {
+    _voiceSessionActive = true;
+    await _ensureAudio();
+    socket.send('channel.join', {'channelId': channelId});
+  }
+
+  Future<void> leaveVoice() async {
+    _voiceSessionActive = false;
+    final channelId = getCurrentVoiceChannelId();
+    if (channelId != null) {
+      socket.send('channel.leave', {'channelId': channelId});
+    }
+    await _closeAllPeers();
+    await _stopTrackGroup(_localAudioStream);
+    _localAudioStream = null;
+    _peerEnsureFutures.clear();
+    onLocalAudioChanged(null);
+  }
+
+  Future<void> toggleMic(bool enabled) async {
+    _micEnabled = enabled;
+    final stream = _localAudioStream;
+    if (stream != null) {
+      for (final track in stream.getAudioTracks()) {
+        track.enabled = enabled;
+      }
+    }
+    final channelId = getCurrentVoiceChannelId();
+    if (channelId != null) {
+      socket.send('voice.state', {'channelId': channelId, 'micEnabled': enabled});
+    }
+  }
+
+  /// 听筒/扬声器切换（移动端专属）。
+  Future<void> setSpeakerphone(bool on) async {
+    await Helper.setSpeakerphoneOn(on);
+  }
+
+  // ------------------------------------------------------------------
+  // presence 驱动的 mesh 维护（对标 handlePresenceSnapshot 等）
+  // ------------------------------------------------------------------
+
+  Future<void> handlePresenceSnapshot(List<PresenceMember> members) async {
+    if (!_voiceSessionActive) return;
+    final selfId = getCurrentUser()?.id;
+    final seen = <int>{};
+
+    for (final member in members) {
+      if (member.user.id == selfId) continue;
+      seen.add(member.user.id);
+      if (_failedPeers.contains(member.user.id)) continue;
+      final shouldOffer = selfId != null && selfId < member.user.id;
+      await _ensurePeer(member.user, shouldOffer);
+      _ensureMediaFlow(member.user.id, 'audio', 'presence.snapshot');
+      _ensureMediaFlow(member.user.id, 'screen', 'presence.snapshot');
+    }
+
+    for (final userId in _peers.keys.toList()) {
+      if (!seen.contains(userId)) {
+        handleMemberLeft(userId);
+      }
+    }
+  }
+
+  Future<void> handleMemberJoined(PresenceMember member) async {
+    if (!_voiceSessionActive) return;
+    final selfId = getCurrentUser()?.id;
+    if (member.user.id == selfId) return;
+    // 对方重新进入频道视为新一轮连接，解除历史失败标记
+    _failedPeers.remove(member.user.id);
+    _peerRebuildCounts.remove(member.user.id);
+    final shouldOffer = selfId != null && selfId < member.user.id;
+    await _ensurePeer(member.user, shouldOffer);
+    _ensureMediaFlow(member.user.id, 'audio', 'member.joined');
+    _ensureMediaFlow(member.user.id, 'screen', 'member.joined');
+  }
+
+  void handleMemberLeft(int userId) {
+    if (!_voiceSessionActive) return;
+    _failedPeers.remove(userId);
+    _peerRebuildCounts.remove(userId);
+    _outageNoticeAt.remove(userId);
+    _destroyPeer(userId);
+  }
+
+  void handleScreenState(int userId, bool screenSharing) {
+    if (!_voiceSessionActive) return;
+    if (!screenSharing) {
+      _clearMediaReconnect(userId, 'screen');
+      return;
+    }
+    _ensureMediaFlow(userId, 'screen', 'screen.state');
+  }
+
+  void handleVoiceState(int userId, bool micEnabled) {
+    if (!_voiceSessionActive) return;
+    if (!micEnabled) {
+      _clearMediaReconnect(userId, 'audio');
+      return;
+    }
+    _ensureMediaFlow(userId, 'audio', 'voice.state');
+  }
+
+  // ------------------------------------------------------------------
+  // 信令处理（对标 handleSignal）
+  // ------------------------------------------------------------------
+
+  Future<void> handleSignal(String type, Map<String, dynamic> payload) async {
+    if (!_voiceSessionActive) return;
+    try {
+      final sourceUserId = (payload['sourceUserId'] as num?)?.toInt();
+      if (sourceUserId == null) return;
+      final peerUser = _lookupUser(sourceUserId);
+      if (peerUser == null) return;
+
+      if (type == 'rtc.reset') {
+        // reset 对撞决胜：impolite 方（id 小）刚发过 reset 时忽略对方的 reset，
+        // 自己的重建胜出；polite 方无条件服从。
+        final selfIsImpolite = (getCurrentUser()?.id ?? 0) < peerUser.id;
+        final sentAt = _lastResetSentAt[peerUser.id];
+        if (selfIsImpolite && sentAt != null && _nowMs - sentAt < resetGlareWindowMs) {
+          return;
+        }
+        await _recreatePeer(
+          peerUser.id,
+          payload['reason'] as String? ?? 'remote-reset',
+          notifyRemote: false,
+          relayOnly: payload['relayOnly'] as bool? ?? false,
+        );
+        return;
+      }
+
+      final wrapper = await _ensurePeer(peerUser, false);
+
+      if (type == 'screen.sync_request' || type == 'media.sync_request') {
+        // 移动端 v1 不发送屏幕流；音频补流请求照常应答（刷新 outbound + 重新 offer）
+        final kind = type == 'screen.sync_request'
+            ? 'screen'
+            : (payload['kind'] as String? ?? 'screen');
+        if (kind == 'screen') return; // 无本地屏幕流可补
+        await _refreshLocalOutboundForNegotiation(wrapper);
+        await _sendOffer(wrapper);
+        return;
+      }
+
+      if (type == 'rtc.offer' && payload['sdp'] is String) {
+        final signalingState = wrapper.pc.signalingState;
+        final readyForOffer = !wrapper.makingOffer &&
+            (signalingState == RTCSignalingState.RTCSignalingStateStable ||
+                wrapper.isSettingRemoteAnswerPending);
+        final offerCollision = !readyForOffer;
+
+        wrapper.ignoreOffer = !wrapper.polite && offerCollision;
+        if (wrapper.ignoreOffer) return;
+
+        if (offerCollision) {
+          // flutter_webrtc 无 setRemoteDescription 隐式回滚，polite 方显式回滚本地 offer
+          try {
+            await wrapper.pc
+                .setLocalDescription(RTCSessionDescription(null, 'rollback'));
+          } catch (_) {
+            await _recreatePeer(peerUser.id, 'rollback-failed',
+                notifyRemote: true, relayOnly: wrapper.useRelayOnly);
+            return;
+          }
+        }
+
+        wrapper.isSettingRemoteAnswerPending = false;
+        await wrapper.pc.setRemoteDescription(
+            RTCSessionDescription(payload['sdp'] as String, 'offer'));
+        await _refreshLocalOutboundForNegotiation(wrapper);
+        await _flushPendingIceCandidates(wrapper);
+        final answer = await wrapper.pc.createAnswer();
+        await wrapper.pc.setLocalDescription(answer);
+        socket.send('rtc.answer', {
+          'channelId': getCurrentVoiceChannelId(),
+          'targetUserId': sourceUserId,
+          'sdp': answer.sdp,
+        });
+        return;
+      }
+
+      if (type == 'rtc.answer' && payload['sdp'] is String) {
+        if (wrapper.pc.signalingState !=
+            RTCSignalingState.RTCSignalingStateHaveLocalOffer) {
+          return;
+        }
+        wrapper.isSettingRemoteAnswerPending = true;
+        await wrapper.pc.setRemoteDescription(
+            RTCSessionDescription(payload['sdp'] as String, 'answer'));
+        wrapper.isSettingRemoteAnswerPending = false;
+        await _flushPendingIceCandidates(wrapper);
+        return;
+      }
+
+      if (type == 'rtc.ice_candidate' && payload['candidate'] is String) {
+        final candidate =
+            jsonDecode(payload['candidate'] as String) as Map<String, dynamic>;
+        final remoteDesc = await wrapper.pc.getRemoteDescription();
+        if (remoteDesc == null) {
+          wrapper.pendingIceCandidates.add(candidate);
+          return;
+        }
+        await wrapper.pc.addCandidate(_toIceCandidate(candidate));
+      }
+    } catch (_) {
+      // 与 web 端一致：单条信令失败不打断整体会话
+    }
+  }
+
+  RTCIceCandidate _toIceCandidate(Map<String, dynamic> json) => RTCIceCandidate(
+        json['candidate'] as String?,
+        json['sdpMid'] as String?,
+        (json['sdpMLineIndex'] as num?)?.toInt(),
+      );
+
+  // ------------------------------------------------------------------
+  // 本地音频
+  // ------------------------------------------------------------------
+
+  Future<MediaStream> _ensureAudio() async {
+    final existing = _localAudioStream;
+    if (existing != null) return existing;
+    final stream = await navigator.mediaDevices.getUserMedia({
+      'audio': {
+        'echoCancellation': true,
+        'noiseSuppression': true,
+        'autoGainControl': true,
+      },
+      'video': false,
+    });
+    for (final track in stream.getAudioTracks()) {
+      track.enabled = _micEnabled;
+    }
+    _localAudioStream = stream;
+    onLocalAudioChanged(stream);
+    return stream;
+  }
+
+  Future<void> _refreshLocalOutboundForNegotiation(PeerWrapper wrapper) async {
+    // 对标 web 端：offer/answer/recreate 前刷新 outbound，
+    // 避免重连后 sender 挂着旧轨道导致单向无声
+    await _bindLocalTracks(wrapper);
+  }
+
+  Future<void> _bindLocalTracks(PeerWrapper wrapper,
+      {bool forceReplace = false}) async {
+    final audioTrack = _localAudioStream?.getAudioTracks().firstOrNull;
+
+    if (forceReplace) {
+      await wrapper.audioTransceiver.sender.replaceTrack(null);
+      await wrapper.displayAudioTransceiver.sender.replaceTrack(null);
+      await wrapper.screenTransceiver.sender.replaceTrack(null);
+    }
+
+    await wrapper.audioTransceiver.sender.replaceTrack(audioTrack);
+    await wrapper.audioTransceiver.setDirection(audioTrack != null
+        ? TransceiverDirection.SendRecv
+        : TransceiverDirection.RecvOnly);
+
+    // 移动端 v1 不发送屏幕音频/视频，保持 recvonly
+    await wrapper.displayAudioTransceiver.sender.replaceTrack(null);
+    await wrapper.displayAudioTransceiver
+        .setDirection(TransceiverDirection.RecvOnly);
+    await wrapper.screenTransceiver.sender.replaceTrack(null);
+    await wrapper.screenTransceiver.setDirection(TransceiverDirection.RecvOnly);
+  }
+
+  Future<void> _forceRefreshLocalOutboundAfterReconnect(
+      PeerWrapper wrapper, bool renegotiate) async {
+    if (!_voiceSessionActive || !_peers.containsKey(wrapper.user.id)) return;
+
+    // TURN/ICE 重连后的强制发送端修复：replaceTrack(null→track) 重建发送管线，
+    // 解决“连接恢复但 RTP 不发包”的单向无声（对标 web 端同名逻辑）
+    await _bindLocalTracks(wrapper, forceReplace: true);
+
+    final channelId = getCurrentVoiceChannelId();
+    if (channelId != null) {
+      socket.send('voice.state', {'channelId': channelId, 'micEnabled': _micEnabled});
+    }
+
+    if (renegotiate &&
+        wrapper.initialOfferOwner &&
+        wrapper.pc.signalingState == RTCSignalingState.RTCSignalingStateStable) {
+      await _sendOffer(wrapper);
+    }
+  }
+
+  void _scheduleOutboundRehydrateAfterReconnect(PeerWrapper wrapper) {
+    if (!_voiceSessionActive || !_peers.containsKey(wrapper.user.id)) return;
+    _clearOutboundRehydrateTimers(wrapper);
+    for (var i = 0; i < outboundRehydrateDelaysMs.length; i++) {
+      final isLast = i == outboundRehydrateDelaysMs.length - 1;
+      wrapper.outboundRehydrateTimers.add(
+        Timer(Duration(milliseconds: outboundRehydrateDelaysMs[i]), () {
+          _forceRefreshLocalOutboundAfterReconnect(wrapper, isLast);
+        }),
+      );
+    }
+  }
+
+  void _clearOutboundRehydrateTimers(PeerWrapper wrapper) {
+    for (final timer in wrapper.outboundRehydrateTimers) {
+      timer.cancel();
+    }
+    wrapper.outboundRehydrateTimers.clear();
+  }
+
+  // ------------------------------------------------------------------
+  // peer 创建与销毁
+  // ------------------------------------------------------------------
+
+  Future<PeerWrapper> _ensurePeer(OopzUser user, bool initialOfferOwner,
+      {bool relayOnly = false}) async {
+    final existing = _peers[user.id];
+    if (existing != null) {
+      if (relayOnly && !existing.useRelayOnly) {
+        _destroyPeer(user.id);
+      } else {
+        final state = existing.pc.connectionState;
+        if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
+            state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
+          _destroyPeer(user.id);
+        } else {
+          _clearPeerReconnect(existing);
+          if (initialOfferOwner) {
+            existing.initialOfferOwner = true;
+            await _refreshLocalOutboundForNegotiation(existing);
+          }
+          return existing;
+        }
+      }
+    }
+
+    final pending = _peerEnsureFutures[user.id];
+    if (pending != null) {
+      final ensured = await pending;
+      if (initialOfferOwner && !ensured.initialOfferOwner) {
+        ensured.initialOfferOwner = true;
+        await _refreshLocalOutboundForNegotiation(ensured);
+        await _sendOffer(ensured);
+      }
+      return ensured;
+    }
+
+    final future = _createPeer(user, initialOfferOwner, relayOnly);
+    _peerEnsureFutures[user.id] = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_peerEnsureFutures[user.id], future)) {
+        _peerEnsureFutures.remove(user.id);
+      }
+    }
+  }
+
+  Future<PeerWrapper> _createPeer(
+      OopzUser user, bool initialOfferOwner, bool relayOnly) async {
+    final currentUser = getCurrentUser();
+    if (currentUser == null) {
+      throw StateError('missing current user');
+    }
+
+    final pc = await createPeerConnection({
+      'iceServers': relayOnly ? _relayIceServers() : getIceServers(),
+      'sdpSemantics': 'unified-plan',
+      'bundlePolicy': 'max-bundle',
+      'rtcpMuxPolicy': 'require',
+      'iceTransportPolicy': relayOnly ? 'relay' : 'all',
+    });
+
+    final audioTransceiver = await pc.addTransceiver(
+      kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+      init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+    );
+    final displayAudioTransceiver = await pc.addTransceiver(
+      kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+      init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+    );
+    final screenTransceiver = await pc.addTransceiver(
+      kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
+      init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+    );
+
+    final wrapper = PeerWrapper(
+      user: user,
+      pc: pc,
+      polite: currentUser.id > user.id,
+      initialOfferOwner: initialOfferOwner,
+      audioTransceiver: audioTransceiver,
+      displayAudioTransceiver: displayAudioTransceiver,
+      screenTransceiver: screenTransceiver,
+      useRelayOnly: relayOnly,
+      lastKnownTransport: relayOnly ? TransportType.turn : TransportType.unknown,
+      createdAtMs: _nowMs,
+    );
+
+    pc.onIceCandidate = (RTCIceCandidate candidate) {
+      if ((candidate.candidate ?? '').isEmpty) return;
+      socket.send('rtc.ice_candidate', {
+        'channelId': getCurrentVoiceChannelId(),
+        'targetUserId': user.id,
+        'candidate': jsonEncode({
+          'candidate': candidate.candidate,
+          'sdpMid': candidate.sdpMid,
+          'sdpMLineIndex': candidate.sdpMLineIndex,
+        }),
+      });
+    };
+
+    pc.onIceGatheringState = (RTCIceGatheringState state) {
+      if (state == RTCIceGatheringState.RTCIceGatheringStateComplete) {
+        Timer(const Duration(milliseconds: iceGatheringEvalDelayMs), () {
+          _evaluatePeerConnectivity(user.id, 'ice-no-usable-candidate');
+        });
+      }
+    };
+
+    pc.onTrack = (RTCTrackEvent event) => _handleRemoteTrack(wrapper, event);
+
+    pc.onIceConnectionState = (RTCIceConnectionState state) {
+      if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
+          state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
+        _handlePeerConnected(wrapper);
+        _scheduleOutboundRehydrateAfterReconnect(wrapper);
+        return;
+      }
+      if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
+        _cancelStableReset(wrapper);
+        _schedulePeerReconnect(
+          user.id,
+          _isTurnLink(wrapper) ? turnDisconnectGraceMs : peerReconnectDelayMs,
+          'ice-disconnected',
+        );
+        return;
+      }
+      if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
+        _cancelStableReset(wrapper);
+        _schedulePeerReconnect(user.id, 0, 'ice-failed');
+      }
+    };
+
+    pc.onConnectionState = (RTCPeerConnectionState state) {
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+        _handlePeerConnected(wrapper);
+        _scheduleOutboundRehydrateAfterReconnect(wrapper);
+        return;
+      }
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
+        _cancelStableReset(wrapper);
+        _schedulePeerDisconnectCleanup(user.id);
+        _ensureMediaFlow(user.id, 'audio', 'peer-disconnected');
+        _ensureMediaFlow(user.id, 'screen', 'peer-disconnected');
+        _schedulePeerReconnect(
+          user.id,
+          _isTurnLink(wrapper) ? turnDisconnectGraceMs : peerReconnectDelayMs,
+          'peer-disconnected',
+        );
+        return;
+      }
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+        _cancelStableReset(wrapper);
+        _schedulePeerReconnect(user.id, 0, 'peer-failed');
+      }
+    };
+
+    _peers[user.id] = wrapper;
+    if (initialOfferOwner) {
+      await _refreshLocalOutboundForNegotiation(wrapper);
+      await _sendOffer(wrapper);
+    }
+    return wrapper;
+  }
+
+  bool _isTurnLink(PeerWrapper wrapper) =>
+      wrapper.useRelayOnly || wrapper.lastKnownTransport == TransportType.turn;
+
+  Future<void> _handleRemoteTrack(PeerWrapper wrapper, RTCTrackEvent event) async {
+    final userId = wrapper.user.id;
+    final media = _remoteMedia[userId] ?? RemoteMedia(user: wrapper.user);
+    final track = event.track;
+
+    // 以 mid 区分第二条 audio transceiver（屏幕共享音频），与 web 端语义一致
+    final isDisplayAudio = track.kind == 'audio' &&
+        event.transceiver != null &&
+        event.transceiver!.mid == wrapper.displayAudioTransceiver.mid;
+
+    final stream = event.streams.isNotEmpty
+        ? event.streams.first
+        : await _wrapTrackInStream(userId, track);
+
+    if (track.kind == 'audio') {
+      if (isDisplayAudio) {
+        media.displayAudioStream = stream;
+        _clearMediaReconnect(userId, 'screen');
+      } else {
+        media.audioStream = stream;
+        _clearMediaReconnect(userId, 'audio');
+      }
+    } else if (track.kind == 'video') {
+      media.screenStream = stream;
+      _clearMediaReconnect(userId, 'screen');
+    }
+
+    track.onEnded = () {
+      final current = _remoteMedia[userId];
+      if (current == null) return;
+      if (track.kind == 'audio') {
+        if (isDisplayAudio) {
+          current.displayAudioStream = null;
+          _ensureMediaFlow(userId, 'screen', 'remote-track-ended');
+        } else {
+          current.audioStream = null;
+          _ensureMediaFlow(userId, 'audio', 'remote-track-ended');
+        }
+      } else {
+        current.screenStream = null;
+        _ensureMediaFlow(userId, 'screen', 'remote-track-ended');
+      }
+      onMediaChanged(Map.of(_remoteMedia));
+    };
+
+    track.onMute = () {
+      if (track.kind == 'audio') {
+        _ensureMediaFlow(userId, isDisplayAudio ? 'screen' : 'audio', 'remote-track-muted');
+      } else {
+        _ensureMediaFlow(userId, 'screen', 'remote-track-muted');
+      }
+    };
+
+    _remoteMedia[userId] = media;
+    onMediaChanged(Map.of(_remoteMedia));
+  }
+
+  Future<MediaStream?> _wrapTrackInStream(int userId, MediaStreamTrack track) async {
+    try {
+      final stream =
+          await createLocalMediaStream('remote-${track.kind}-$userId-${track.id}');
+      await stream.addTrack(track);
+      return stream;
+    } catch (_) {
+      // 移动端音频轨即便不进 MediaStream 也会自动播放；视频渲染才需要 stream
+      return null;
+    }
+  }
+
+  Future<void> _handlePeerConnected(PeerWrapper wrapper) async {
+    _clearPeerReconnect(wrapper, resetAttempts: false);
+    _clearPeerDisconnectTimer(wrapper.user.id);
+    _scheduleStableReset(wrapper);
+    _startPeerStats(wrapper);
+  }
+
+  Future<void> _sendOffer(PeerWrapper wrapper) async {
+    if (wrapper.makingOffer) return;
+    if (wrapper.pc.signalingState != RTCSignalingState.RTCSignalingStateStable) {
+      return;
+    }
+    try {
+      wrapper.makingOffer = true;
+      await _refreshLocalOutboundForNegotiation(wrapper);
+      final offer = await wrapper.pc.createOffer();
+      await wrapper.pc.setLocalDescription(offer);
+      socket.send('rtc.offer', {
+        'channelId': getCurrentVoiceChannelId(),
+        'targetUserId': wrapper.user.id,
+        'sdp': offer.sdp,
+      });
+    } catch (_) {
+      onNotice('error', '实时通信异常', 'WebRTC 协商失败，请重进频道');
+    } finally {
+      wrapper.makingOffer = false;
+    }
+  }
+
+  Future<void> _flushPendingIceCandidates(PeerWrapper wrapper) async {
+    if (wrapper.pendingIceCandidates.isEmpty) return;
+    final queued =
+        List<Map<String, dynamic>>.of(wrapper.pendingIceCandidates);
+    wrapper.pendingIceCandidates.clear();
+    for (final candidate in queued) {
+      try {
+        await wrapper.pc.addCandidate(_toIceCandidate(candidate));
+      } catch (_) {
+        // 与 web 端一致：忽略 glare 场景下的过期 candidate
+      }
+    }
+  }
+
+  Future<void> _closeAllPeers() async {
+    for (final timer in _mediaReconnectTimers.values) {
+      timer.cancel();
+    }
+    _mediaReconnectTimers.clear();
+    _mediaReconnectAttempts.clear();
+    for (final timer in _peerDisconnectTimers.values) {
+      timer.cancel();
+    }
+    _peerDisconnectTimers.clear();
+    for (final wrapper in _peers.values) {
+      _clearPeerReconnect(wrapper);
+      _cancelStableReset(wrapper);
+      _clearOutboundRehydrateTimers(wrapper);
+      _stopPeerStats(wrapper);
+      await wrapper.pc.close();
+    }
+    _peers.clear();
+    _remoteMedia.clear();
+    _peerRebuildCounts.clear();
+    _failedPeers.clear();
+    _lastResetSentAt.clear();
+    _outageNoticeAt.clear();
+    _diagnostics.clear();
+    onMediaChanged(Map.of(_remoteMedia));
+    onDiagnosticsChanged(Map.of(_diagnostics));
+  }
+
+  Future<void> _stopTrackGroup(MediaStream? stream) async {
+    if (stream == null) return;
+    for (final track in stream.getTracks()) {
+      await track.stop();
+    }
+    await stream.dispose();
+  }
+
+  OopzUser? _lookupUser(int userId) => getVoiceMembers()[userId]?.user;
+
+  // ------------------------------------------------------------------
+  // media.sync_request 补流循环（对标 ensureMediaFlow / requestMediaSync）
+  // ------------------------------------------------------------------
+
+  void _ensureMediaFlow(int userId, String kind, String reason) {
+    if (!_voiceSessionActive) return;
+    if (getCurrentVoiceChannelId() == null) return;
+    if (userId == getCurrentUser()?.id) return;
+    if (_failedPeers.contains(userId)) return;
+    final voiceMember = getVoiceMembers()[userId];
+    if (voiceMember == null) return;
+    if (kind == 'screen' && !voiceMember.screenSharing) return;
+    final media = _remoteMedia[userId];
+    final existingStream = kind == 'audio' ? media?.audioStream : media?.screenStream;
+    if (existingStream != null) {
+      _clearMediaReconnect(userId, kind);
+      return;
+    }
+    _requestMediaSync(userId, kind, reason);
+  }
+
+  void _requestMediaSync(int userId, String kind, String reason) {
+    final channelId = getCurrentVoiceChannelId();
+    if (channelId == null) return;
+    final voiceMember = getVoiceMembers()[userId];
+    if (voiceMember == null || (kind == 'screen' && !voiceMember.screenSharing)) {
+      _clearMediaReconnect(userId, kind);
+      return;
+    }
+    final key = '$userId:$kind';
+    final attempt = (_mediaReconnectAttempts[key] ?? 0) + 1;
+    if (attempt > mediaReconnectMaxAttempts) {
+      _clearMediaReconnect(userId, kind);
+      return;
+    }
+    _mediaReconnectAttempts[key] = attempt;
+    _mediaReconnectTimers.remove(key)?.cancel();
+    socket.send('media.sync_request', {
+      'channelId': channelId,
+      'targetUserId': userId,
+      'kind': kind,
+      'reason': reason,
+      'attempt': attempt,
+    });
+    _mediaReconnectTimers[key] =
+        Timer(const Duration(milliseconds: mediaReconnectDelayMs), () {
+      _mediaReconnectTimers.remove(key);
+      _requestMediaSync(userId, kind, 'retry');
+    });
+  }
+
+  void _clearMediaReconnect(int userId, String kind) {
+    final key = '$userId:$kind';
+    _mediaReconnectTimers.remove(key)?.cancel();
+    _mediaReconnectAttempts.remove(key);
+  }
+
+  // ------------------------------------------------------------------
+  // 断线重连状态机（含 4 项加固，对标 web 端最新实现）
+  // ------------------------------------------------------------------
+
+  void _schedulePeerDisconnectCleanup(int userId) {
+    if (_peerDisconnectTimers.containsKey(userId)) return;
+    _peerDisconnectTimers[userId] =
+        Timer(const Duration(milliseconds: peerDisconnectGraceMs), () {
+      _peerDisconnectTimers.remove(userId);
+      final wrapper = _peers[userId];
+      if (wrapper == null) return;
+      if (wrapper.pc.connectionState ==
+          RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
+        handleMemberLeft(userId);
+      }
+    });
+  }
+
+  void _clearPeerDisconnectTimer(int userId) {
+    _peerDisconnectTimers.remove(userId)?.cancel();
+  }
+
+  void _clearPeerReconnect(PeerWrapper wrapper, {bool resetAttempts = true}) {
+    wrapper.reconnectTimer?.cancel();
+    wrapper.reconnectTimer = null;
+    if (resetAttempts) {
+      wrapper.reconnectAttempts = 0;
+    }
+    wrapper.reconnecting = false;
+  }
+
+  void _scheduleStableReset(PeerWrapper wrapper) {
+    _cancelStableReset(wrapper);
+    wrapper.stableTimer = Timer(const Duration(milliseconds: peerStableResetMs), () {
+      wrapper.stableTimer = null;
+      final connectionState = wrapper.pc.connectionState;
+      final iceState = wrapper.pc.iceConnectionState;
+      if (connectionState ==
+              RTCPeerConnectionState.RTCPeerConnectionStateConnected ||
+          iceState == RTCIceConnectionState.RTCIceConnectionStateConnected ||
+          iceState == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
+        wrapper.reconnectAttempts = 0;
+        _peerRebuildCounts.remove(wrapper.user.id);
+        _outageNoticeAt.remove(wrapper.user.id);
+      }
+    });
+  }
+
+  void _cancelStableReset(PeerWrapper wrapper) {
+    wrapper.stableTimer?.cancel();
+    wrapper.stableTimer = null;
+  }
+
+  bool _shouldNotifyOutage(int userId) {
+    final last = _outageNoticeAt[userId];
+    if (last != null && _nowMs - last < outageNoticeIntervalMs) {
+      return false;
+    }
+    _outageNoticeAt[userId] = _nowMs;
+    return true;
+  }
+
+  void _schedulePeerReconnect(int userId, int delayMs, String reason) {
+    if (!_voiceSessionActive) return;
+    if (_failedPeers.contains(userId)) return;
+    final wrapper = _peers[userId];
+    if (wrapper == null || wrapper.reconnecting) return;
+    if (wrapper.reconnectTimer != null) return;
+
+    final nextAttempt = wrapper.reconnectAttempts + 1;
+    final turnFallback = _isTurnLink(wrapper) ||
+        (nextAttempt >= 2 && _relayIceServers().isNotEmpty);
+    // polite 方多等一拍：正常情况下 impolite 方的 rtc.reset 会先到，
+    // 本地定时器随 recreate 被清掉，避免双方同时重建打架
+    final effectiveDelayMs =
+        wrapper.polite ? delayMs + politeRecreateExtraDelayMs : delayMs;
+    wrapper.reconnectTimer = Timer(Duration(milliseconds: effectiveDelayMs), () {
+      wrapper.reconnectTimer = null;
+      _attemptPeerReconnect(userId, reason);
+    });
+    if (_shouldNotifyOutage(userId)) {
+      onNotice(
+        'info',
+        '实时连接重连中',
+        turnFallback
+            ? '与 ${wrapper.user.displayName} 的连接不稳定，正在使用 TURN 中继重连'
+            : '与 ${wrapper.user.displayName} 的连接出现波动，正在自动重连',
+      );
+    }
+  }
+
+  Future<void> _attemptPeerReconnect(int userId, String reason) async {
+    if (!_voiceSessionActive) return;
+    final wrapper = _peers[userId];
+    if (wrapper == null || getCurrentVoiceChannelId() == null) return;
+    if (wrapper.pc.connectionState ==
+        RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
+      return;
+    }
+
+    wrapper.reconnectAttempts += 1;
+    wrapper.reconnecting = true;
+    final attempt = wrapper.reconnectAttempts;
+    final switchingToRelay = !wrapper.useRelayOnly &&
+        wrapper.lastKnownTransport != TransportType.turn &&
+        attempt >= 2 &&
+        _relayIceServers().isNotEmpty;
+
+    try {
+      if (_isTurnLink(wrapper)) {
+        // TURN/relay 断线不走 ICE restart 补丁，直接 rtc.reset 双方局部重建
+        await _recreatePeer(userId, reason, notifyRemote: true, relayOnly: true);
+        return;
+      }
+
+      if (!switchingToRelay &&
+          wrapper.pc.signalingState ==
+              RTCSignalingState.RTCSignalingStateStable &&
+          !wrapper.makingOffer) {
+        final offer = await wrapper.pc.createOffer({'iceRestart': true});
+        await wrapper.pc.setLocalDescription(offer);
+        socket.send('rtc.offer', {
+          'channelId': getCurrentVoiceChannelId(),
+          'targetUserId': wrapper.user.id,
+          'sdp': offer.sdp,
+        });
+        wrapper.reconnecting = false;
+        // 直连 ICE restart 留满超时窗口再判失败
+        _schedulePeerReconnect(userId, iceRestartTimeoutMs, 'ice-restart-timeout');
+        return;
+      }
+
+      final shouldUseRelayOnly = switchingToRelay || _isTurnLink(wrapper);
+      await _recreatePeer(userId, reason,
+          notifyRemote: true, relayOnly: shouldUseRelayOnly);
+    } catch (_) {
+      wrapper.reconnecting = false;
+      if (attempt >= peerReconnectMaxAttempts) {
+        await _recreatePeer(userId, 'reconnect-max-attempts',
+            notifyRemote: true, relayOnly: _isTurnLink(wrapper));
+        return;
+      }
+      _schedulePeerReconnect(userId, peerReconnectDelayMs, 'reconnect-retry');
+    }
+  }
+
+  Future<void> _recreatePeer(int userId, String reason,
+      {required bool notifyRemote, bool relayOnly = false}) async {
+    if (!_voiceSessionActive) return;
+    final wrapper = _peers[userId];
+    final user = wrapper?.user ?? _lookupUser(userId);
+    final currentUser = getCurrentUser();
+    final channelId = getCurrentVoiceChannelId();
+    if (user == null || currentUser == null || channelId == null) return;
+
+    // 重建预算：稳定期(8s)清零；耗尽进终态停止循环重建
+    final rebuildCount = (_peerRebuildCounts[userId] ?? 0) + 1;
+    if (rebuildCount > maxPeerRebuilds) {
+      _failedPeers.add(userId);
+      _destroyPeer(userId);
+      onNotice(
+        'error',
+        '重连失败',
+        '与 ${user.displayName} 的连接多次重建失败，已停止自动重连，可尝试重新进入频道',
+      );
+      return;
+    }
+    _peerRebuildCounts[userId] = rebuildCount;
+
+    _destroyPeer(userId);
+
+    if (notifyRemote) {
+      _lastResetSentAt[userId] = _nowMs;
+      socket.send('rtc.reset', {
+        'channelId': channelId,
+        'targetUserId': userId,
+        'reason': reason,
+        'relayOnly': relayOnly,
+      });
+    }
+
+    final shouldOffer = currentUser.id < user.id;
+    if (relayOnly && _shouldNotifyOutage(userId)) {
+      onNotice('info', '已切换 TURN 中继', '与 ${user.displayName} 的连接已改用 TURN 中继重建');
+    }
+    final nextWrapper = await _ensurePeer(user, shouldOffer, relayOnly: relayOnly);
+    await _refreshLocalOutboundForNegotiation(nextWrapper);
+    nextWrapper.reconnecting = false;
+    nextWrapper.reconnectAttempts = relayOnly ? 1 : 0;
+    if (relayOnly) {
+      nextWrapper.lastKnownTransport = TransportType.turn;
+    }
+    if (shouldOffer) {
+      await _sendOffer(nextWrapper);
+    }
+  }
+
+  void _destroyPeer(int userId) {
+    _peerEnsureFutures.remove(userId);
+    final wrapper = _peers.remove(userId);
+    if (wrapper == null) return;
+    _clearPeerReconnect(wrapper);
+    _cancelStableReset(wrapper);
+    _clearOutboundRehydrateTimers(wrapper);
+    _clearPeerDisconnectTimer(userId);
+    _clearMediaReconnect(userId, 'audio');
+    _clearMediaReconnect(userId, 'screen');
+    _stopPeerStats(wrapper);
+    wrapper.pc.close();
+    _remoteMedia.remove(userId);
+    _diagnostics.remove(userId);
+    onMediaChanged(Map.of(_remoteMedia));
+    onDiagnosticsChanged(Map.of(_diagnostics));
+  }
+
+  List<Map<String, dynamic>> _relayIceServers() {
+    return getIceServers().where((server) {
+      final urls = server['urls'];
+      final list = urls is List ? urls : [urls];
+      return list.any((url) =>
+          url.toString().startsWith('turn:') || url.toString().startsWith('turns:'));
+    }).toList();
+  }
+
+  // ------------------------------------------------------------------
+  // 连通性评估与统计（对标 evaluatePeerConnectivity / collectPeerStats）
+  // ------------------------------------------------------------------
+
+  Future<void> _evaluatePeerConnectivity(int userId, String reason) async {
+    if (!_voiceSessionActive) return;
+    final wrapper = _peers[userId];
+    if (wrapper == null || wrapper.reconnecting || wrapper.reconnectTimer != null) {
+      return;
+    }
+    if (getCurrentVoiceChannelId() == null) return;
+    final connectionState = wrapper.pc.connectionState;
+    final iceState = wrapper.pc.iceConnectionState;
+    if (connectionState ==
+            RTCPeerConnectionState.RTCPeerConnectionStateConnected ||
+        iceState == RTCIceConnectionState.RTCIceConnectionStateConnected ||
+        iceState == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
+      return;
+    }
+
+    try {
+      final stats = await wrapper.pc.getStats();
+      final hasUsablePair = stats.any((report) =>
+          report.type == 'candidate-pair' &&
+          (report.values['state'] == 'succeeded' ||
+              report.values['nominated'] == true));
+      if (hasUsablePair) return;
+
+      // 建连宽限期：gathering 刚结束没有 succeeded pair 是正常现象，
+      // 宽限期内只复查不重建，避免误杀还在握手中的连接
+      final ageMs = _nowMs - wrapper.createdAtMs;
+      if (ageMs < peerEstablishGraceMs) {
+        Timer(const Duration(milliseconds: establishReevalDelayMs), () {
+          _evaluatePeerConnectivity(userId, reason);
+        });
+        return;
+      }
+      _schedulePeerReconnect(userId, 0, reason);
+    } catch (_) {
+      // stats 采集失败不影响会话
+    }
+  }
+
+  void _startPeerStats(PeerWrapper wrapper) {
+    if (wrapper.statsTimer != null) return;
+    _collectPeerStats(wrapper);
+    wrapper.statsTimer = Timer.periodic(
+      const Duration(milliseconds: peerStatsIntervalMs),
+      (_) => _collectPeerStats(wrapper),
+    );
+  }
+
+  void _stopPeerStats(PeerWrapper wrapper) {
+    wrapper.statsTimer?.cancel();
+    wrapper.statsTimer = null;
+  }
+
+  Future<void> _collectPeerStats(PeerWrapper wrapper) async {
+    try {
+      final stats = await wrapper.pc.getStats();
+      final reports = <String, StatsReport>{};
+      String selectedPairId = '';
+      for (final report in stats) {
+        reports[report.id] = report;
+        if (report.type == 'transport') {
+          final pairId = report.values['selectedCandidatePairId'];
+          if (pairId is String && pairId.isNotEmpty) {
+            selectedPairId = pairId;
+          }
+        }
+      }
+      StatsReport? pair = reports[selectedPairId];
+      if (pair == null) {
+        for (final report in stats) {
+          if (report.type == 'candidate-pair' &&
+              (report.values['state'] == 'succeeded' ||
+                  report.values['nominated'] == true)) {
+            pair = report;
+          }
+        }
+      }
+      if (pair == null) return;
+
+      final localCandidate = reports[pair.values['localCandidateId']];
+      final remoteCandidate = reports[pair.values['remoteCandidateId']];
+      final transport = _resolveTransportType(
+        localCandidate?.values['candidateType'] as String?,
+        remoteCandidate?.values['candidateType'] as String?,
+      );
+      if (transport != TransportType.unknown) {
+        wrapper.lastKnownTransport = transport;
+      }
+
+      int? latencyMs;
+      final rtt = pair.values['currentRoundTripTime'];
+      if (rtt is num) {
+        latencyMs = (rtt * 1000).round();
+      }
+
+      _diagnostics[wrapper.user.id] = PeerDiagnostics(
+        userId: wrapper.user.id,
+        latencyMs: latencyMs,
+        transport: transport,
+        retryCount: wrapper.reconnectAttempts,
+        recoveryMode: wrapper.useRelayOnly
+            ? RecoveryMode.relay
+            : wrapper.reconnectAttempts > 0
+                ? RecoveryMode.iceRestart
+                : RecoveryMode.stable,
+        updatedAt: DateTime.now(),
+      );
+      onDiagnosticsChanged(Map.of(_diagnostics));
+    } catch (_) {
+      // 忽略单次统计失败
+    }
+  }
+
+  TransportType _resolveTransportType(String? localType, String? remoteType) {
+    if (localType == 'relay' || remoteType == 'relay') return TransportType.turn;
+    if (localType == 'srflx' ||
+        localType == 'prflx' ||
+        remoteType == 'srflx' ||
+        remoteType == 'prflx') {
+      return TransportType.stun;
+    }
+    if (localType == 'host' || remoteType == 'host') return TransportType.lan;
+    return TransportType.unknown;
+  }
+}
+
+extension<T> on List<T> {
+  T? get firstOrNull => isEmpty ? null : first;
+}
