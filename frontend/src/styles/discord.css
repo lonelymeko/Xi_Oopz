@@ -657,6 +657,13 @@ body {
   color: #7d7d7d;
 }
 
+.search-box svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  color: #8f8f8f;
+}
+
 .search-box input {
   width: 100%;
   background: transparent;
@@ -1045,12 +1052,6 @@ body {
   font-size: 1rem;
 }
 
-.empty-state {
-  border-radius: 18px;
-  background: #191919;
-  color: #8f8f8f;
-}
-
 .identity-modal {
   position: fixed;
   inset: 0;
@@ -1337,13 +1338,19 @@ body {
 }
 
 .notice-card__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 28px;
   height: 28px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.06);
   color: var(--text);
-  font-size: 1rem;
-  line-height: 1;
+}
+
+.notice-card__close svg {
+  width: 14px;
+  height: 14px;
 }
 
 .empty-state {

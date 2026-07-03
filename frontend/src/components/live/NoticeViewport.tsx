@@ -1,3 +1,5 @@
+import { CloseIcon } from "./icons";
+
 type NoticeItem = {
   id: number;
   kind: "error" | "info";
@@ -19,7 +21,7 @@ export function NoticeViewport({ notices, onDismiss }: { notices: NoticeItem[]; 
             <p>{notice.message}</p>
           </div>
           <button className="notice-card__close" onClick={() => onDismiss(notice.id)} aria-label="关闭通知">
-            ×
+            <CloseIcon />
           </button>
         </div>
       ))}

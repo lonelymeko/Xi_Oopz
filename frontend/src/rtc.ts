@@ -17,6 +17,7 @@ type PeerWrapper = {
   reconnectAttempts: number;
   reconnectTimer: number | null;
   reconnecting: boolean;
+  createdAt: number;
   useRelayOnly: boolean;
   lastKnownTransport: PeerConnectionDiagnostics["transport"];
   statsTimer: number | null;
@@ -54,6 +55,12 @@ export class RTCController {
   private static readonly ICE_GATHERING_EVAL_DELAY_MS = 800;
   private static readonly PEER_STABLE_RESET_MS = 8000;
   private static readonly OUTBOUND_REHYDRATE_DELAYS_MS = [300, 1200];
+  private static readonly PEER_ESTABLISH_GRACE_MS = 8000;
+  private static readonly ESTABLISH_REEVAL_DELAY_MS = 2000;
+  private static readonly RESET_GLARE_WINDOW_MS = 3000;
+  private static readonly POLITE_RECREATE_EXTRA_DELAY_MS = 1500;
+  private static readonly MAX_PEER_REBUILDS = 3;
+  private static readonly OUTAGE_NOTICE_INTERVAL_MS = 30000;
 
   private localAudioStream: MediaStream | null = null;
   private localMicStream: MediaStream | null = null;
@@ -67,6 +74,10 @@ export class RTCController {
   private mediaReconnectAttempts = new Map<string, number>();
   private mediaReconnectTimers = new Map<string, number>();
   private peerDisconnectTimers = new Map<number, number>();
+  private peerRebuildCounts = new Map<number, number>();
+  private failedPeers = new Set<number>();
+  private lastResetSentAt = new Map<number, number>();
+  private outageNoticeAt = new Map<number, number>();
   private audioInputDeviceId = "";
   private noiseSuppressionEnabled = true;
   private micEnabled = true;
@@ -277,6 +288,7 @@ export class RTCController {
     for (const member of members) {
       if (member.user.id === selfId) continue;
       seen.add(member.user.id);
+      if (this.failedPeers.has(member.user.id)) continue;
       const shouldOffer = selfId != null && selfId < member.user.id;
       await this.ensurePeer(member.user, shouldOffer);
       this.ensureMediaFlow(member.user.id, "audio", "presence.snapshot");
@@ -295,6 +307,9 @@ export class RTCController {
   async handleMemberJoined(member: PresenceMember) {
     if (!this.voiceSessionActive) return;
     if (member.user.id === this.getCurrentUser()?.id) return;
+    // 对方重新进入频道视为新一轮连接，解除历史重连失败标记
+    this.failedPeers.delete(member.user.id);
+    this.peerRebuildCounts.delete(member.user.id);
     const selfId = this.getCurrentUser()?.id;
     const shouldOffer = selfId != null && selfId < member.user.id;
     await this.ensurePeer(member.user, shouldOffer);
@@ -304,6 +319,9 @@ export class RTCController {
 
   handleMemberLeft(userId: number) {
     if (!this.voiceSessionActive) return;
+    this.failedPeers.delete(userId);
+    this.peerRebuildCounts.delete(userId);
+    this.outageNoticeAt.delete(userId);
     this.destroyPeer(userId);
   }
 
@@ -317,6 +335,16 @@ export class RTCController {
 
       if (type === "rtc.reset") {
         if (!this.voiceSessionActive) {
+          return;
+        }
+        // reset 对撞决胜：断线时双方常同时发起 recreate+reset，若不裁决会互相销毁
+        // 对方刚重建好的 PeerConnection，形成 reset 乒乓。规则与完美协商一致：
+        // impolite 方（id 小）刚发过 reset 时忽略对方的 reset，自己的重建胜出；
+        // polite 方无条件服从对方的 reset。
+        const selfIsImpolite = (this.getCurrentUser()?.id ?? 0) < peerUser.id;
+        const sentAt = this.lastResetSentAt.get(peerUser.id);
+        if (selfIsImpolite && sentAt != null && performance.now() - sentAt < RTCController.RESET_GLARE_WINDOW_MS) {
+          this.log("reconnect:reset-glare-ignored", { userId: peerUser.id, reason: payload.reason || "remote-reset" });
           return;
         }
         this.log("reconnect:reset-received", { userId: peerUser.id, reason: payload.reason || "remote-reset", relayOnly: Boolean(payload.relayOnly) });
@@ -822,6 +850,7 @@ export class RTCController {
       reconnectAttempts: 0,
       reconnectTimer: null,
       reconnecting: false,
+      createdAt: performance.now(),
       useRelayOnly: relayOnly,
       lastKnownTransport: relayOnly ? "turn" : "unknown",
       statsTimer: null,
@@ -1075,6 +1104,10 @@ export class RTCController {
     }
     this.peers.clear();
     this.remoteMedia.clear();
+    this.peerRebuildCounts.clear();
+    this.failedPeers.clear();
+    this.lastResetSentAt.clear();
+    this.outageNoticeAt.clear();
     this.onMediaChanged(new Map(this.remoteMedia));
   }
 
@@ -1110,6 +1143,7 @@ export class RTCController {
     if (!this.voiceSessionActive) return;
     if (!this.getCurrentVoiceChannelId()) return;
     if (userId === this.getCurrentUser()?.id) return;
+    if (this.failedPeers.has(userId)) return;
     const voiceMember = this.getVoiceMembers().get(userId);
     if (!voiceMember) return;
     if (kind === "screen" && !voiceMember.screenSharing) return;
@@ -1215,6 +1249,8 @@ export class RTCController {
         wrapper.pc.iceConnectionState === "completed"
       ) {
         wrapper.reconnectAttempts = 0;
+        this.peerRebuildCounts.delete(wrapper.user.id);
+        this.outageNoticeAt.delete(wrapper.user.id);
       }
     }, RTCController.PEER_STABLE_RESET_MS);
   }
@@ -1229,6 +1265,9 @@ export class RTCController {
     if (!this.voiceSessionActive) {
       return;
     }
+    if (this.failedPeers.has(userId)) {
+      return;
+    }
     const wrapper = this.peers.get(userId);
     if (!wrapper || wrapper.reconnecting) {
       return;
@@ -1241,18 +1280,33 @@ export class RTCController {
       wrapper.useRelayOnly ||
       wrapper.lastKnownTransport === "turn" ||
       (nextAttempt >= 2 && this.getRelayIceServers().length > 0);
+    // polite 方（id 大）多等一拍再重连：正常情况下 impolite 方的 rtc.reset 会先到，
+    // 本地这个定时器随 recreate 被清掉，避免双方同时发起重建互相打架。
+    const effectiveDelayMs = wrapper.polite ? delayMs + RTCController.POLITE_RECREATE_EXTRA_DELAY_MS : delayMs;
     wrapper.reconnectTimer = window.setTimeout(() => {
       wrapper.reconnectTimer = null;
       void this.attemptPeerReconnect(userId, reason);
-    }, delayMs);
-    this.log("reconnect:scheduled", { userId, delayMs, reason, attempt: nextAttempt, turnFallback });
-    this.onNotice(
-      "info",
-      "实时连接重连中",
-      turnFallback
-        ? `与 ${wrapper.user.displayName} 的连接不稳定，正在使用 TURN 中继重连`
-        : `与 ${wrapper.user.displayName} 的连接出现波动，正在自动重连`,
-    );
+    }, effectiveDelayMs);
+    this.log("reconnect:scheduled", { userId, delayMs: effectiveDelayMs, reason, attempt: nextAttempt, turnFallback });
+    if (this.shouldNotifyOutage(userId)) {
+      this.onNotice(
+        "info",
+        "实时连接重连中",
+        turnFallback
+          ? `与 ${wrapper.user.displayName} 的连接不稳定，正在使用 TURN 中继重连`
+          : `与 ${wrapper.user.displayName} 的连接出现波动，正在自动重连`,
+      );
+    }
+  }
+
+  // 同一 peer 的一轮断线故障期内（30s），重连/切中继类通知只发一次，避免刷屏。
+  private shouldNotifyOutage(userId: number) {
+    const last = this.outageNoticeAt.get(userId);
+    if (last != null && performance.now() - last < RTCController.OUTAGE_NOTICE_INTERVAL_MS) {
+      return false;
+    }
+    this.outageNoticeAt.set(userId, performance.now());
+    return true;
   }
 
   private async attemptPeerReconnect(userId: number, reason: string) {
@@ -1298,8 +1352,8 @@ export class RTCController {
         });
         this.log("reconnect:ice-restart", { userId: wrapper.user.id, attempt, reason, relayOnly: wrapper.useRelayOnly });
         wrapper.reconnecting = false;
-        const timeout = isTurnConnection ? RTCController.ICE_RESTART_TIMEOUT_MS : RTCController.PEER_RECONNECT_DELAY_MS;
-        this.schedulePeerReconnect(userId, timeout, "ice-restart-timeout");
+        // 此分支只有直连会走到（TURN 已在上面 return），给 ICE restart 留满超时窗口
+        this.schedulePeerReconnect(userId, RTCController.ICE_RESTART_TIMEOUT_MS, "ice-restart-timeout");
         return;
       }
 
@@ -1328,10 +1382,27 @@ export class RTCController {
       return;
     }
 
-    this.log("reconnect:recreate", { userId, reason, notifyRemote, relayOnly });
+    // 重建预算：稳定期（8s）内会清零；预算耗尽说明链路已不可自动恢复，
+    // 进入终态停止循环重建，等对方重新进频道或本人重进频道再恢复。
+    const rebuildCount = (this.peerRebuildCounts.get(userId) || 0) + 1;
+    if (rebuildCount > RTCController.MAX_PEER_REBUILDS) {
+      this.log("reconnect:gave-up", { userId, reason, rebuildCount });
+      this.failedPeers.add(userId);
+      this.destroyPeer(userId);
+      this.onNotice(
+        "error",
+        "重连失败",
+        `与 ${user.displayName} 的连接多次重建失败，已停止自动重连，可尝试重新进入频道`,
+      );
+      return;
+    }
+    this.peerRebuildCounts.set(userId, rebuildCount);
+
+    this.log("reconnect:recreate", { userId, reason, notifyRemote, relayOnly, rebuildCount });
     this.destroyPeer(userId);
 
     if (notifyRemote) {
+      this.lastResetSentAt.set(userId, performance.now());
       this.socket.send("rtc.reset", {
         channelId: this.getCurrentVoiceChannelId(),
         targetUserId: userId,
@@ -1341,7 +1412,7 @@ export class RTCController {
     }
 
     const shouldOffer = currentUser.id < user.id;
-    if (relayOnly) {
+    if (relayOnly && this.shouldNotifyOutage(userId)) {
       this.onNotice("info", "已切换 TURN 中继", `与 ${user.displayName} 的连接已改用 TURN 中继重建`);
     }
     const nextWrapper = await this.ensurePeer(user, shouldOffer, relayOnly);
@@ -1515,6 +1586,18 @@ export class RTCController {
         }
       });
       if (hasUsablePair) {
+        return;
+      }
+      // 建连宽限期：trickle ICE 下 end-of-candidates 常早于连通性检查完成（TURN 分配更慢），
+      // gathering 刚结束时没有 succeeded pair 是正常现象。此时触发重连会把还在握手中的
+      // 连接推倒重来（信令非 stable 时甚至直接走 recreate），弱网下可能永远建不起来。
+      // 未过宽限期只安排复查，过了宽限期仍无可用 pair 才算真失败。
+      const ageMs = performance.now() - wrapper.createdAt;
+      if (ageMs < RTCController.PEER_ESTABLISH_GRACE_MS) {
+        this.log("ice:no-usable-pair-waiting", { userId, ageMs: Math.round(ageMs), reason });
+        window.setTimeout(() => {
+          void this.evaluatePeerConnectivity(userId, reason);
+        }, RTCController.ESTABLISH_REEVAL_DELAY_MS);
         return;
       }
       this.log("ice:no-usable-pair", {
