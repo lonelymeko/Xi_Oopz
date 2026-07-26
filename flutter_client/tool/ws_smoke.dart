@@ -4,7 +4,7 @@
 import 'dart:async';
 import 'dart:io';
 
-import '../lib/src/socket_client.dart';
+import 'package:oopz_flutter_client/src/socket_client.dart';
 
 Future<void> main(List<String> args) async {
   final wsBaseUrl = args[0];
@@ -29,7 +29,8 @@ Future<void> main(List<String> args) async {
       }
       if (type == 'presence.snapshot' && !completer.isCompleted) {
         final members = payload['members'] as List<dynamic>? ?? const [];
-        stdout.writeln('presence members=${members.length} channelId=${payload['channelId']}');
+        stdout.writeln(
+            'presence members=${members.length} channelId=${payload['channelId']}');
         completer.complete();
       }
     },

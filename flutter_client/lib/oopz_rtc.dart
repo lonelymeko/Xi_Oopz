@@ -5,6 +5,9 @@
 library oopz_rtc;
 
 export 'src/api_client.dart';
+export 'src/background_service.dart';
 export 'src/rtc_controller.dart';
+export 'src/screening_controller.dart';
+export 'src/session_store.dart';
 export 'src/socket_client.dart';
 export 'src/types.dart';

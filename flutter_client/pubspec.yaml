@@ -10,9 +10,16 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flutter_webrtc: ^0.11.7
+  flutter_webrtc: ^1.5.2
   web_socket_channel: ^3.0.1
   http: ^1.2.1
+  video_player: ^2.9.2
+  # 本地持久化：保存登录态（token / 服务器 / 用户）
+  shared_preferences: ^2.3.2
+  # Android 后台保活：前台服务（语音不被杀）
+  flutter_foreground_task: ^8.17.0
+  # Android 画中画：视频进后台小窗继续播放
+  floating: ^6.0.0
 
 dev_dependencies:
   flutter_test:
