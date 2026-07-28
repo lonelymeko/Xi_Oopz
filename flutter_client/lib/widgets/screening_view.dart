@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
 
 import '../oopz_rtc.dart';
@@ -71,7 +72,21 @@ class ScreeningView extends StatelessWidget {
       child = AspectRatio(
         aspectRatio:
             video.value.aspectRatio == 0 ? 16 / 9 : video.value.aspectRatio,
-        child: VideoPlayer(video),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            VideoPlayer(video),
+            Positioned(
+              right: 8,
+              top: 8,
+              child: IconButton.filledTonal(
+                tooltip: '全屏',
+                icon: const Icon(Icons.fullscreen),
+                onPressed: () => _openFullscreen(context),
+              ),
+            ),
+          ],
+        ),
       );
     } else if (controller.state?.hasVideo ?? false) {
       child = const Center(
@@ -92,6 +107,17 @@ class ScreeningView extends StatelessWidget {
     }
     // 填满父级 Expanded，视频用 Center+AspectRatio 居中留黑边，不强制自身高度
     return Container(color: Colors.black, child: Center(child: child));
+  }
+
+  void _openFullscreen(BuildContext context) {
+    final video = controller.video;
+    if (video == null || !video.value.isInitialized) return;
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        fullscreenDialog: true,
+        builder: (_) => _ScreeningFullscreenPage(controller: controller),
+      ),
+    );
   }
 
   // ---- 播放控制条 ----
@@ -225,6 +251,136 @@ class ScreeningView extends StatelessWidget {
     final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
     final h = d.inHours;
     return h > 0 ? '$h:$m:$s' : '$m:$s';
+  }
+}
+
+class _ScreeningFullscreenPage extends StatefulWidget {
+  final ScreeningController controller;
+
+  const _ScreeningFullscreenPage({required this.controller});
+
+  @override
+  State<_ScreeningFullscreenPage> createState() =>
+      _ScreeningFullscreenPageState();
+}
+
+class _ScreeningFullscreenPageState extends State<_ScreeningFullscreenPage> {
+  @override
+  void initState() {
+    super.initState();
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    SystemChrome.setPreferredOrientations(const [
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+  }
+
+  @override
+  void dispose() {
+    SystemChrome.setPreferredOrientations(const []);
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final video = widget.controller.video;
+    final isController = widget.controller.isController;
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(
+        children: [
+          Center(
+            child: video != null && video.value.isInitialized
+                ? AspectRatio(
+                    aspectRatio: video.value.aspectRatio == 0
+                        ? 16 / 9
+                        : video.value.aspectRatio,
+                    child: VideoPlayer(video),
+                  )
+                : const Text('视频未就绪', style: TextStyle(color: Colors.white54)),
+          ),
+          Positioned(
+            left: 12,
+            top: 12,
+            child: SafeArea(
+              child: IconButton.filledTonal(
+                tooltip: '退出全屏',
+                icon: const Icon(Icons.fullscreen_exit),
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+            ),
+          ),
+          if (video != null)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: _FullscreenControls(
+                video: video,
+                controller: widget.controller,
+                isController: isController,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FullscreenControls extends StatelessWidget {
+  final VideoPlayerController video;
+  final ScreeningController controller;
+  final bool isController;
+
+  const _FullscreenControls({
+    required this.video,
+    required this.controller,
+    required this.isController,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<VideoPlayerValue>(
+      valueListenable: video,
+      builder: (context, value, _) {
+        final playing = value.isPlaying;
+        final position = value.position;
+        final duration = value.duration;
+        return SafeArea(
+          top: false,
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.68),
+            ),
+            child: Row(
+              children: [
+                IconButton(
+                  icon: Icon(playing ? Icons.pause : Icons.play_arrow),
+                  onPressed: isController
+                      ? () => playing ? controller.pause() : controller.play()
+                      : null,
+                ),
+                Expanded(
+                  child: _ProgressBar(
+                    position: position,
+                    duration: duration,
+                    enabled: isController,
+                    onSeek: (secs) => controller.seek(secs),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  '${ScreeningView._fmt(position)} / ${ScreeningView._fmt(duration)}',
+                  style: const TextStyle(fontSize: 12, color: Colors.white70),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 }
 

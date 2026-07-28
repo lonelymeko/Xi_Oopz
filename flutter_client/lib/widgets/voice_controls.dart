@@ -40,8 +40,8 @@ class VoiceControls extends StatelessWidget {
               onTap: onToggleMic,
             ),
             _CtrlBtn(
-              icon: speakerOn ? Icons.volume_up : Icons.hearing,
-              label: speakerOn ? '扬声器' : '听筒',
+              icon: speakerOn ? Icons.volume_up : Icons.headphones,
+              label: speakerOn ? '扬声器' : '耳机优先',
               color: Colors.white,
               bg: const Color(0xFF2A2A2A),
               onTap: onToggleSpeaker,

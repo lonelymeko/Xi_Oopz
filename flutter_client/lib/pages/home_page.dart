@@ -47,7 +47,7 @@ class _HomePageState extends State<HomePage> {
   Map<int, PeerDiagnostics> _diagnostics = {};
   final Map<int, RTCVideoRenderer> _screenRenderers = {};
   bool _micEnabled = true;
-  bool _speakerOn = true;
+  bool _speakerOn = false; // false = 蓝牙/有线耳机优先，true = 强制扬声器
   bool _wsConnected = false;
   String? _error;
 
@@ -199,8 +199,7 @@ class _HomePageState extends State<HomePage> {
     nameController.dispose();
     if (ok != true || name.isEmpty) return;
     try {
-      final domain =
-          await _api.createDomain(widget.auth.token, name: name);
+      final domain = await _api.createDomain(widget.auth.token, name: name);
       await _fetchDomains();
       await _switchDomain(domain.id); // 创建后自动进入新域
     } catch (e) {
@@ -221,8 +220,7 @@ class _HomePageState extends State<HomePage> {
             const Padding(
               padding: EdgeInsets.fromLTRB(20, 4, 20, 8),
               child: Text('切换域',
-                  style:
-                      TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
             ),
             Flexible(
               child: ListView(
@@ -672,8 +670,8 @@ class _HomePageState extends State<HomePage> {
                   size: 18, color: Colors.white54),
             if (_viewingChannel != null) const SizedBox(width: 8),
             Text(_title,
-                style: const TextStyle(
-                    fontSize: 16, fontWeight: FontWeight.w600)),
+                style:
+                    const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
             const Spacer(),
             _wsIndicator(),
           ],
@@ -698,8 +696,7 @@ class _HomePageState extends State<HomePage> {
                       : Theme.of(context).colorScheme.error),
               const SizedBox(width: 6),
               Text(_wsConnected ? '在线' : '重连中',
-                  style:
-                      const TextStyle(fontSize: 12, color: Colors.white70)),
+                  style: const TextStyle(fontSize: 12, color: Colors.white70)),
             ],
           ),
         ),

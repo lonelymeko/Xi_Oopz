@@ -93,7 +93,8 @@ class RTCController {
   final Map<int, PresenceMember> Function() getVoiceMembers;
   final List<Map<String, dynamic>> Function() getIceServers;
   final void Function(Map<int, RemoteMedia> media) onMediaChanged;
-  final void Function(Map<int, PeerDiagnostics> diagnostics) onDiagnosticsChanged;
+  final void Function(Map<int, PeerDiagnostics> diagnostics)
+      onDiagnosticsChanged;
   final void Function(MediaStream? stream) onLocalAudioChanged;
   final void Function(String kind, String title, String message) onNotice;
 
@@ -170,14 +171,22 @@ class RTCController {
     }
     final channelId = getCurrentVoiceChannelId();
     if (channelId != null) {
-      socket.send('voice.state', {'channelId': channelId, 'micEnabled': enabled});
+      socket
+          .send('voice.state', {'channelId': channelId, 'micEnabled': enabled});
     }
   }
 
-  /// 听筒/扬声器切换（仅移动端支持；桌面端无此原生方法，静默跳过）。
+  /// 音频输出切换（仅移动端支持；桌面端无此原生方法，静默跳过）。
+  ///
+  /// [on] 为 false 时不强制听筒，而是交给 flutter_webrtc 的
+  /// “优先蓝牙/有线耳机，否则扬声器”策略，避免蓝牙耳机连接后仍被外放抢占。
   Future<void> setSpeakerphone(bool on) async {
     try {
-      await Helper.setSpeakerphoneOn(on);
+      if (on) {
+        await Helper.setSpeakerphoneOn(true);
+      } else {
+        await Helper.setSpeakerphoneOnButPreferBluetooth();
+      }
     } catch (e) {
       _rlog('setSpeakerphone 当前平台不支持（忽略）: $e');
     }
@@ -191,7 +200,8 @@ class RTCController {
     if (!_voiceSessionActive) return;
     final selfId = getCurrentUser()?.id;
     final seen = <int>{};
-    _rlog('presence.snapshot self=$selfId 成员=${members.map((m) => m.user.id).toList()}');
+    _rlog(
+        'presence.snapshot self=$selfId 成员=${members.map((m) => m.user.id).toList()}');
 
     for (final member in members) {
       if (member.user.id == selfId) continue;
@@ -271,7 +281,9 @@ class RTCController {
         // 自己的重建胜出；polite 方无条件服从。
         final selfIsImpolite = (getCurrentUser()?.id ?? 0) < peerUser.id;
         final sentAt = _lastResetSentAt[peerUser.id];
-        if (selfIsImpolite && sentAt != null && _nowMs - sentAt < resetGlareWindowMs) {
+        if (selfIsImpolite &&
+            sentAt != null &&
+            _nowMs - sentAt < resetGlareWindowMs) {
           return;
         }
         await _recreatePeer(
@@ -338,7 +350,8 @@ class RTCController {
       if (type == 'rtc.answer' && payload['sdp'] is String) {
         if (wrapper.pc.signalingState !=
             RTCSignalingState.RTCSignalingStateHaveLocalOffer) {
-          _rlog('收到 answer 但 signalingState=${wrapper.pc.signalingState}（非 HaveLocalOffer，忽略）');
+          _rlog(
+              '收到 answer 但 signalingState=${wrapper.pc.signalingState}（非 HaveLocalOffer，忽略）');
           return;
         }
         _rlog('应用 answer <- peer=$sourceUserId');
@@ -416,7 +429,8 @@ class RTCController {
   /// 单个 transceiver 操作容错：macOS 上重新协商后缓存的 transceiver 引用会失效，
   /// setDirection/replaceTrack 抛 "transceiver not found"。此处吞掉单次失败，
   /// 避免一次刷新失败中断整个 offer/answer 协商（轨道通常已在首次协商挂好）。
-  Future<void> _safeTransceiver(String op, Future<void> Function() action) async {
+  Future<void> _safeTransceiver(
+      String op, Future<void> Function() action) async {
     try {
       await action();
     } catch (e) {
@@ -427,7 +441,8 @@ class RTCController {
   Future<void> _bindLocalTracks(PeerWrapper wrapper,
       {bool forceReplace = false}) async {
     final audioTrack = _localAudioStream?.getAudioTracks().firstOrNull;
-    _rlog('_bindLocalTracks peer=${wrapper.user.id} audioTrack=${audioTrack != null} forceReplace=$forceReplace');
+    _rlog(
+        '_bindLocalTracks peer=${wrapper.user.id} audioTrack=${audioTrack != null} forceReplace=$forceReplace');
 
     if (forceReplace) {
       await _safeTransceiver('audio.replaceTrack(null)',
@@ -455,8 +470,10 @@ class RTCController {
             .setDirection(TransceiverDirection.RecvOnly));
     await _safeTransceiver('screen.replaceTrack(null)',
         () => wrapper.screenTransceiver.sender.replaceTrack(null));
-    await _safeTransceiver('screen.setDirection',
-        () => wrapper.screenTransceiver.setDirection(TransceiverDirection.RecvOnly));
+    await _safeTransceiver(
+        'screen.setDirection',
+        () => wrapper.screenTransceiver
+            .setDirection(TransceiverDirection.RecvOnly));
     _rlog('_bindLocalTracks peer=${wrapper.user.id} 完成');
   }
 
@@ -470,12 +487,14 @@ class RTCController {
 
     final channelId = getCurrentVoiceChannelId();
     if (channelId != null) {
-      socket.send('voice.state', {'channelId': channelId, 'micEnabled': _micEnabled});
+      socket.send(
+          'voice.state', {'channelId': channelId, 'micEnabled': _micEnabled});
     }
 
     if (renegotiate &&
         wrapper.initialOfferOwner &&
-        wrapper.pc.signalingState == RTCSignalingState.RTCSignalingStateStable) {
+        wrapper.pc.signalingState ==
+            RTCSignalingState.RTCSignalingStateStable) {
       await _sendOffer(wrapper);
     }
   }
@@ -558,7 +577,8 @@ class RTCController {
       throw StateError('missing current user');
     }
 
-    _rlog('_createPeer peer=${user.id} iceServers数=${(relayOnly ? _relayIceServers() : getIceServers()).length} 开始建 pc');
+    _rlog(
+        '_createPeer peer=${user.id} iceServers数=${(relayOnly ? _relayIceServers() : getIceServers()).length} 开始建 pc');
     final pc = await createPeerConnection({
       'iceServers': relayOnly ? _relayIceServers() : getIceServers(),
       'sdpSemantics': 'unified-plan',
@@ -577,13 +597,13 @@ class RTCController {
         ? await pc.addTransceiver(
             track: micTrack,
             kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
-            init: RTCRtpTransceiverInit(
-                direction: TransceiverDirection.SendRecv),
+            init:
+                RTCRtpTransceiverInit(direction: TransceiverDirection.SendRecv),
           )
         : await pc.addTransceiver(
             kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
-            init: RTCRtpTransceiverInit(
-                direction: TransceiverDirection.RecvOnly),
+            init:
+                RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
           );
     final displayAudioTransceiver = await pc.addTransceiver(
       kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
@@ -603,7 +623,8 @@ class RTCController {
       displayAudioTransceiver: displayAudioTransceiver,
       screenTransceiver: screenTransceiver,
       useRelayOnly: relayOnly,
-      lastKnownTransport: relayOnly ? TransportType.turn : TransportType.unknown,
+      lastKnownTransport:
+          relayOnly ? TransportType.turn : TransportType.unknown,
       createdAtMs: _nowMs,
     );
     // 桌面端麦克风轨道已在 addTransceiver 时挂好，标记为已绑定，
@@ -693,7 +714,8 @@ class RTCController {
     };
 
     _peers[user.id] = wrapper;
-    _rlog('_createPeer peer=${user.id} transceiver就绪 initialOfferOwner=$initialOfferOwner');
+    _rlog(
+        '_createPeer peer=${user.id} transceiver就绪 initialOfferOwner=$initialOfferOwner');
     if (initialOfferOwner) {
       await _refreshLocalOutboundForNegotiation(wrapper);
       await _sendOffer(wrapper);
@@ -704,11 +726,13 @@ class RTCController {
   bool _isTurnLink(PeerWrapper wrapper) =>
       wrapper.useRelayOnly || wrapper.lastKnownTransport == TransportType.turn;
 
-  Future<void> _handleRemoteTrack(PeerWrapper wrapper, RTCTrackEvent event) async {
+  Future<void> _handleRemoteTrack(
+      PeerWrapper wrapper, RTCTrackEvent event) async {
     final userId = wrapper.user.id;
     final media = _remoteMedia[userId] ?? RemoteMedia(user: wrapper.user);
     final track = event.track;
-    _rlog('远端轨道到达 peer=$userId kind=${track.kind} mid=${event.transceiver?.mid}');
+    _rlog(
+        '远端轨道到达 peer=$userId kind=${track.kind} mid=${event.transceiver?.mid}');
 
     // 以 mid 区分第二条 audio transceiver（屏幕共享音频），与 web 端语义一致
     final isDisplayAudio = track.kind == 'audio' &&
@@ -752,7 +776,8 @@ class RTCController {
 
     track.onMute = () {
       if (track.kind == 'audio') {
-        _ensureMediaFlow(userId, isDisplayAudio ? 'screen' : 'audio', 'remote-track-muted');
+        _ensureMediaFlow(
+            userId, isDisplayAudio ? 'screen' : 'audio', 'remote-track-muted');
       } else {
         _ensureMediaFlow(userId, 'screen', 'remote-track-muted');
       }
@@ -762,10 +787,11 @@ class RTCController {
     onMediaChanged(Map.of(_remoteMedia));
   }
 
-  Future<MediaStream?> _wrapTrackInStream(int userId, MediaStreamTrack track) async {
+  Future<MediaStream?> _wrapTrackInStream(
+      int userId, MediaStreamTrack track) async {
     try {
-      final stream =
-          await createLocalMediaStream('remote-${track.kind}-$userId-${track.id}');
+      final stream = await createLocalMediaStream(
+          'remote-${track.kind}-$userId-${track.id}');
       await stream.addTrack(track);
       return stream;
     } catch (_) {
@@ -793,7 +819,8 @@ class RTCController {
       return;
     }
     if (!_isStableOrNull(wrapper.pc.signalingState)) {
-      _rlog('_sendOffer peer=${wrapper.user.id} 跳过：signalingState=${wrapper.pc.signalingState}');
+      _rlog(
+          '_sendOffer peer=${wrapper.user.id} 跳过：signalingState=${wrapper.pc.signalingState}');
       return;
     }
     try {
@@ -821,8 +848,7 @@ class RTCController {
 
   Future<void> _flushPendingIceCandidates(PeerWrapper wrapper) async {
     if (wrapper.pendingIceCandidates.isEmpty) return;
-    final queued =
-        List<Map<String, dynamic>>.of(wrapper.pendingIceCandidates);
+    final queued = List<Map<String, dynamic>>.of(wrapper.pendingIceCandidates);
     wrapper.pendingIceCandidates.clear();
     for (final candidate in queued) {
       try {
@@ -884,7 +910,8 @@ class RTCController {
     if (voiceMember == null) return;
     if (kind == 'screen' && !voiceMember.screenSharing) return;
     final media = _remoteMedia[userId];
-    final existingStream = kind == 'audio' ? media?.audioStream : media?.screenStream;
+    final existingStream =
+        kind == 'audio' ? media?.audioStream : media?.screenStream;
     if (existingStream != null) {
       _clearMediaReconnect(userId, kind);
       return;
@@ -896,7 +923,8 @@ class RTCController {
     final channelId = getCurrentVoiceChannelId();
     if (channelId == null) return;
     final voiceMember = getVoiceMembers()[userId];
-    if (voiceMember == null || (kind == 'screen' && !voiceMember.screenSharing)) {
+    if (voiceMember == null ||
+        (kind == 'screen' && !voiceMember.screenSharing)) {
       _clearMediaReconnect(userId, kind);
       return;
     }
@@ -961,7 +989,8 @@ class RTCController {
 
   void _scheduleStableReset(PeerWrapper wrapper) {
     _cancelStableReset(wrapper);
-    wrapper.stableTimer = Timer(const Duration(milliseconds: peerStableResetMs), () {
+    wrapper.stableTimer =
+        Timer(const Duration(milliseconds: peerStableResetMs), () {
       wrapper.stableTimer = null;
       final connectionState = wrapper.pc.connectionState;
       final iceState = wrapper.pc.iceConnectionState;
@@ -1004,7 +1033,8 @@ class RTCController {
     // 本地定时器随 recreate 被清掉，避免双方同时重建打架
     final effectiveDelayMs =
         wrapper.polite ? delayMs + politeRecreateExtraDelayMs : delayMs;
-    wrapper.reconnectTimer = Timer(Duration(milliseconds: effectiveDelayMs), () {
+    wrapper.reconnectTimer =
+        Timer(Duration(milliseconds: effectiveDelayMs), () {
       wrapper.reconnectTimer = null;
       _attemptPeerReconnect(userId, reason);
     });
@@ -1039,7 +1069,8 @@ class RTCController {
     try {
       if (_isTurnLink(wrapper)) {
         // TURN/relay 断线不走 ICE restart 补丁，直接 rtc.reset 双方局部重建
-        await _recreatePeer(userId, reason, notifyRemote: true, relayOnly: true);
+        await _recreatePeer(userId, reason,
+            notifyRemote: true, relayOnly: true);
         return;
       }
 
@@ -1056,7 +1087,8 @@ class RTCController {
         });
         wrapper.reconnecting = false;
         // 直连 ICE restart 留满超时窗口再判失败
-        _schedulePeerReconnect(userId, iceRestartTimeoutMs, 'ice-restart-timeout');
+        _schedulePeerReconnect(
+            userId, iceRestartTimeoutMs, 'ice-restart-timeout');
         return;
       }
 
@@ -1113,7 +1145,8 @@ class RTCController {
     if (relayOnly && _shouldNotifyOutage(userId)) {
       onNotice('info', '已切换 TURN 中继', '与 ${user.displayName} 的连接已改用 TURN 中继重建');
     }
-    final nextWrapper = await _ensurePeer(user, shouldOffer, relayOnly: relayOnly);
+    final nextWrapper =
+        await _ensurePeer(user, shouldOffer, relayOnly: relayOnly);
     await _refreshLocalOutboundForNegotiation(nextWrapper);
     nextWrapper.reconnecting = false;
     nextWrapper.reconnectAttempts = relayOnly ? 1 : 0;
@@ -1148,7 +1181,8 @@ class RTCController {
       final urls = server['urls'];
       final list = urls is List ? urls : [urls];
       return list.any((url) =>
-          url.toString().startsWith('turn:') || url.toString().startsWith('turns:'));
+          url.toString().startsWith('turn:') ||
+          url.toString().startsWith('turns:'));
     }).toList();
   }
 
@@ -1159,7 +1193,9 @@ class RTCController {
   Future<void> _evaluatePeerConnectivity(int userId, String reason) async {
     if (!_voiceSessionActive) return;
     final wrapper = _peers[userId];
-    if (wrapper == null || wrapper.reconnecting || wrapper.reconnectTimer != null) {
+    if (wrapper == null ||
+        wrapper.reconnecting ||
+        wrapper.reconnectTimer != null) {
       return;
     }
     if (getCurrentVoiceChannelId() == null) return;
@@ -1214,13 +1250,13 @@ class RTCController {
       final stats = await wrapper.pc.getStats();
       // 出站音频诊断：确认麦克风 RTP 是否真的在发包（排查单向无声）
       for (final report in stats) {
-        if (report.type == 'outbound-rtp' &&
-            report.values['kind'] == 'audio') {
-          _rlog('出站音频 peer=${wrapper.user.id} bytesSent=${report.values['bytesSent']} packetsSent=${report.values['packetsSent']}');
+        if (report.type == 'outbound-rtp' && report.values['kind'] == 'audio') {
+          _rlog(
+              '出站音频 peer=${wrapper.user.id} bytesSent=${report.values['bytesSent']} packetsSent=${report.values['packetsSent']}');
         }
-        if (report.type == 'media-source' &&
-            report.values['kind'] == 'audio') {
-          _rlog('麦克风源 peer=${wrapper.user.id} audioLevel=${report.values['audioLevel']}');
+        if (report.type == 'media-source' && report.values['kind'] == 'audio') {
+          _rlog(
+              '麦克风源 peer=${wrapper.user.id} audioLevel=${report.values['audioLevel']}');
         }
       }
       final reports = <String, StatsReport>{};
@@ -1282,7 +1318,8 @@ class RTCController {
   }
 
   TransportType _resolveTransportType(String? localType, String? remoteType) {
-    if (localType == 'relay' || remoteType == 'relay') return TransportType.turn;
+    if (localType == 'relay' || remoteType == 'relay')
+      return TransportType.turn;
     if (localType == 'srflx' ||
         localType == 'prflx' ||
         remoteType == 'srflx' ||
