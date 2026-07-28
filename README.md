@@ -1,14 +1,14 @@
 # Oopz Live
 前端体验地址：https://oopz.xixiu.top
 
-一个参考 Discord 交互方式实现的实时语音、文字聊天、屏幕共享 Web 应用。
+一个参考 Discord 交互方式实现的实时语音、文字聊天、屏幕共享、一起看视频应用。
 
 项目当前定位是一个可运行、可继续扩展的 MVP，适合做以下场景的原型或二次开发：
 
 - 游戏开黑语音房
 - 小团队在线协作
 - 轻量级社区频道
-- WebRTC / Gin / WebSocket 实时系统练手项目
+- WebRTC / Gin / WebSocket / Flutter 实时系统练手项目
 
 ## 使用截图
 <img width="1280" height="680" alt="a956294c2b584c2b0df1248c22b35649" src="https://github.com/user-attachments/assets/3e9051fe-62ee-4fb0-9175-91465b61830b" />
@@ -32,10 +32,12 @@
 - 语音 / 共享断流后的自动补连与 TURN 重连恢复
 - 连接诊断：显示局域网 / STUN / TURN 链路、RTT 与重连状态
 - Discord 风格三栏桌面 UI
+- Flutter 移动端客户端：登录态持久化、语音连麦、频道切换、放映室同步播放
+- Android 移动端体验：耳机优先音频路由、前台服务通知、放映室视频全屏、视频就绪后后台 PiP 小窗
 
 ## 近期提交重点
 
-最近几次提交主要围绕 WebRTC 在真实网络波动下的稳定性做了修复：
+最近几次提交主要围绕 WebRTC 稳定性和 Flutter 移动端放映室体验做了修复：
 
 - TURN 断线后不再只依赖 ICE restart，relay 链路异常时会通过局部重建 PeerConnection 恢复连接，避免用户被误判为直接退出频道。
 - 修复 TURN 重连后单向无声问题：重连、重新协商、收到 offer/answer 前后都会刷新本地 outbound 音频轨道，屏幕共享音频也会被当作有效音频源处理。
@@ -43,6 +45,11 @@
 - 清理了早期依赖自动 toggleMic 的补丁思路，避免污染用户真实的麦克风静音状态。
 - 修复本地屏幕共享小窗黑屏：小窗预览会同时监听 `screenSharing` 和 `screenStream`，确保 video 元素渲染后重新绑定本地共享流；放大预览与小窗预览表现保持一致。
 - 在头像旁加入前端调试版本号，便于确认浏览器实际加载的是否为最新前端资源。
+- Flutter 放映室添加直链弹窗改为独立 stateful dialog，避免输入框关闭时被外层重建打断导致 `InputDecorator` build scope 断言。
+- Flutter 放映室支持视频全屏播放，并复用同一个 `VideoPlayerController`，避免全屏后重新加载或进度丢失。
+- Android 端默认走“蓝牙/有线耳机优先，否则扬声器”的音频路由；只有用户明确切到“扬声器”时才强制外放。
+- Android 放映室仅在视频已加载成功后启用离开 App 自动 PiP；PiP 中只渲染正在播放的视频画面，不显示成员状态、频道栏、播放列表或底部连麦栏。
+- Android 前台服务通知会显示当前连麦状态、频道类型和房间人数，例如“正在连麦中 · 在视频频道中 · 房间 3 人”。
 
 ## 技术栈
 
@@ -50,7 +57,7 @@
 - 后端：Gin + GORM + WebSocket
 - 数据库：MySQL
 - 缓存 / 在线状态：Redis
-- 实时音视频：浏览器 WebRTC Mesh
+- 实时音视频：浏览器 WebRTC Mesh + Flutter WebRTC
 
 ## 项目交互方向
 
@@ -114,6 +121,7 @@
 │   └── systemd                # systemd 服务模板
 ├── docs                       # 架构说明
 ├── frontend                   # React 前端
+├── flutter_client             # Flutter 移动端客户端
 ├── internal
 │   ├── app                    # 应用启动与路由
 │   ├── auth                   # token 鉴权
@@ -251,7 +259,30 @@ npm run test:run
 http://localhost:5173
 ```
 
-### 4. 让 Gin 直接服务前端
+### 4. 启动 Flutter 移动端客户端
+
+Flutter 客户端位于 `flutter_client/`，复用同一套后端 HTTP + WebSocket 协议：
+
+```bash
+cd flutter_client
+flutter pub get
+flutter run
+```
+
+登录页服务器地址可填在线后端 `https://oopz.xixiu.top`，或本地后端地址。Android 使用本地明文 HTTP 时，需要保持 `android:usesCleartextTraffic="true"`。
+
+移动端已支持：
+
+- 登录态持久化
+- 多域切换、频道侧边栏、语音/放映频道在场成员
+- WebRTC 语音连麦和远端投屏观看
+- 放映室直链视频同步播放、播放列表、控制权转移
+- 放映室视频全屏
+- Android 前台服务保活通知
+- Android 放映室视频就绪后切后台自动进入 PiP，PiP 只显示视频画面
+- Android 音频路由默认耳机优先，避免蓝牙/有线耳机连接后仍从扬声器外放
+
+### 5. 让 Gin 直接服务前端
 
 ```bash
 cd frontend
