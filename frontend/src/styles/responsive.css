@@ -201,6 +201,20 @@
     max-height: none;
   }
 
+  .screening-stage__image-controls {
+    grid-template-columns: auto 1fr auto;
+  }
+
+  .screening-stage__image-time {
+    min-width: 0;
+    text-align: center;
+  }
+
+  .screening-stage__image-range {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
   .chat-panel__title h3 {
     font-size: 1.25rem;
   }

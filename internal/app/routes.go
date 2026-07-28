@@ -38,6 +38,10 @@ func RegisterRoutes(router *gin.Engine, application *App, hub *realtime.Hub) {
 	router.POST("/api/domains/:domainId/channels", handler.CreateChannel)
 	router.GET("/api/domains/:domainId/channels/:channelId/messages", handler.ChannelMessages)
 	router.PATCH("/api/channels/:channelId", handler.UpdateChannel)
+	router.GET("/api/media/proxy.m3u8", handler.ProxyMedia)
+	router.OPTIONS("/api/media/proxy.m3u8", handler.ProxyMedia)
+	router.GET("/api/media/proxy", handler.ProxyMedia)
+	router.OPTIONS("/api/media/proxy", handler.ProxyMedia)
 	router.GET("/ws", handler.ServeWS)
 }
 
