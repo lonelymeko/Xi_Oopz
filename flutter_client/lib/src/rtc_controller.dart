@@ -1318,8 +1318,9 @@ class RTCController {
   }
 
   TransportType _resolveTransportType(String? localType, String? remoteType) {
-    if (localType == 'relay' || remoteType == 'relay')
+    if (localType == 'relay' || remoteType == 'relay') {
       return TransportType.turn;
+    }
     if (localType == 'srflx' ||
         localType == 'prflx' ||
         remoteType == 'srflx' ||

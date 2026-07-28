@@ -110,6 +110,8 @@ class _HomePageState extends State<HomePage> {
         getCurrentUser: () => widget.auth.user,
         onChanged: () {
           if (mounted) setState(() {});
+          unawaited(_syncPipWithScreeningVideo());
+          unawaited(_updateKeepAliveNotification());
         },
         onError: _notify,
       );
@@ -378,12 +380,14 @@ class _HomePageState extends State<HomePage> {
         });
         _rtc?.handlePresenceSnapshot(members);
         _scheduleDomainPresenceRefresh();
+        unawaited(_updateKeepAliveNotification());
         break;
       case 'member.joined':
         final member = PresenceMember.fromJson(payload);
         setState(() => _voiceMembers[member.user.id] = member);
         _rtc?.handleMemberJoined(member);
         _scheduleDomainPresenceRefresh();
+        unawaited(_updateKeepAliveNotification());
         break;
       case 'member.left':
         final userId =
@@ -395,6 +399,7 @@ class _HomePageState extends State<HomePage> {
           _rtc?.handleMemberLeft(userId);
         }
         _scheduleDomainPresenceRefresh();
+        unawaited(_updateKeepAliveNotification());
         break;
       case 'voice.state':
         final userId = (payload['userId'] as num?)?.toInt();
@@ -497,11 +502,7 @@ class _HomePageState extends State<HomePage> {
     setState(() => _currentVoiceChannelId = channel.id);
     await _rtc?.joinVoice(channel.id);
     await _rtc?.setSpeakerphone(_speakerOn);
-    // Android：拉起前台服务，切后台/息屏不杀语音
-    await BackgroundKeepAlive.start(
-      title: 'Oopz · ${channel.name}',
-      text: '语音连麦进行中',
-    );
+    await _updateKeepAliveNotification();
   }
 
   Future<void> _leaveVoice() async {
@@ -519,7 +520,7 @@ class _HomePageState extends State<HomePage> {
   void _joinScreening(ChannelInfo channel) {
     setState(() => _activeScreeningChannelId = channel.id);
     _screening?.join(channel.id);
-    _armPip(); // 放映室：挂「切后台自动进画中画」
+    unawaited(_syncPipWithScreeningVideo());
   }
 
   Future<void> _leaveScreening() async {
@@ -529,7 +530,60 @@ class _HomePageState extends State<HomePage> {
     setState(() => _activeScreeningChannelId = null);
   }
 
-  /// Android：进入放映室时挂载「离开 App 自动进画中画」，视频在后台小窗继续播。
+  ChannelInfo? _channelById(int? channelId) {
+    if (channelId == null) return null;
+    final channels = _bootstrap?.channels;
+    if (channels == null) return null;
+    for (final channel in channels) {
+      if (channel.id == channelId) return channel;
+    }
+    return null;
+  }
+
+  int _roomMemberCount(int channelId) {
+    final screening = _screening;
+    final viewerCount = _activeScreeningChannelId == channelId
+        ? (screening?.viewers.length ?? 0)
+        : 0;
+    final voiceCount = _voiceMembers.length;
+    final presenceCount = _domainPresence.membersByChannel[channelId]?.length ??
+        _domainPresence.onlineCounts[channelId] ??
+        0;
+    final knownCount = [
+      viewerCount,
+      voiceCount,
+      presenceCount,
+    ].fold<int>(0, (max, count) => count > max ? count : max);
+    return knownCount == 0 ? 1 : knownCount;
+  }
+
+  Future<void> _updateKeepAliveNotification() async {
+    final channelId = _currentVoiceChannelId;
+    if (channelId == null) return;
+    final channel = _channelById(channelId);
+    final inScreening =
+        _activeScreeningChannelId == channelId || channel?.type == 'screening';
+    final channelKind = inScreening ? '视频频道' : '语音频道';
+    final channelName = channel?.name ?? '频道';
+    final count = _roomMemberCount(channelId);
+    await BackgroundKeepAlive.start(
+      title: 'Oopz · $channelName',
+      text: '正在连麦中 · 在$channelKind中 · 房间 $count 人',
+    );
+  }
+
+  Future<void> _syncPipWithScreeningVideo() async {
+    final screening = _screening;
+    final shouldArm =
+        _activeScreeningChannelId != null && (screening?.videoReady ?? false);
+    if (shouldArm) {
+      await _armPip();
+    } else {
+      await _disarmPip();
+    }
+  }
+
+  /// Android：仅当放映室已有可播放视频时挂载「离开 App 自动进画中画」。
   Future<void> _armPip() async {
     final floating = _floating;
     if (floating == null || _pipArmed) return;
@@ -589,7 +643,7 @@ class _HomePageState extends State<HomePage> {
       onMeTap: _showAccountMenu,
     );
 
-    return LayoutBuilder(
+    final page = LayoutBuilder(
       builder: (context, constraints) {
         final wide = constraints.maxWidth >= _kWideBreakpoint;
         if (wide) {
@@ -620,6 +674,18 @@ class _HomePageState extends State<HomePage> {
               _currentVoiceChannelId != null ? _voiceBar() : null,
         );
       },
+    );
+
+    final floating = _floating;
+    final screening = _screening;
+    if (floating == null || screening == null) {
+      return page;
+    }
+    return PiPSwitcher(
+      floating: floating,
+      duration: Duration.zero,
+      childWhenEnabled: ScreeningPipVideoView(controller: screening),
+      childWhenDisabled: page,
     );
   }
 

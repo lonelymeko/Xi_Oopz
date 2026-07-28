@@ -4,6 +4,33 @@ import 'package:video_player/video_player.dart';
 
 import '../oopz_rtc.dart';
 
+class ScreeningPipVideoView extends StatelessWidget {
+  final ScreeningController controller;
+
+  const ScreeningPipVideoView({
+    super.key,
+    required this.controller,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final video = controller.video;
+    return ColoredBox(
+      color: Colors.black,
+      child: Center(
+        child: video != null && video.value.isInitialized
+            ? AspectRatio(
+                aspectRatio: video.value.aspectRatio == 0
+                    ? 16 / 9
+                    : video.value.aspectRatio,
+                child: VideoPlayer(video),
+              )
+            : const SizedBox.shrink(),
+      ),
+    );
+  }
+}
+
 /// 放映室视图：直链视频同步播放 + 播放列表 + 观众 + 控制权。
 /// 从 [controller] 读状态；[controller] 变化时由父组件 setState 触发重建。
 class ScreeningView extends StatelessWidget {
