@@ -76,14 +76,42 @@ export function escapeHTML(value: string) {
 }
 
 /**
- * 选择最优输入设备 ID：优先保留当前设备，其次选择非系统占位设备。
+ * 把 enumerateDevices 的音频输入设备整理成下拉选项。
+ *
+ * Chrome 会把系统默认设备额外暴露成 deviceId="default" 的条目，标签形如
+ * "默认 - 麦克风阵列"；这里统一改写成"系统默认（设备名）"，让用户能直接看出
+ * 当前跟随的是系统设置里的哪一只麦克风。
+ */
+export function mapAudioInputDevices(devices: MediaDeviceInfo[]): Array<{ deviceId: string; label: string }> {
+  return devices
+    .filter((device) => device.kind === "audioinput")
+    .map((device, index) => {
+      const rawLabel = device.label || `麦克风 ${index + 1}`;
+      if (device.deviceId === "default" || device.deviceId === "communications") {
+        const prefix = device.deviceId === "default" ? "系统默认" : "通讯默认";
+        const deviceName = device.label
+          ? device.label.replace(/^(default|communications|默认|通讯设备)\s*[-–—:：]\s*/i, "").trim()
+          : "";
+        return { deviceId: device.deviceId, label: deviceName ? `${prefix}（${deviceName}）` : prefix };
+      }
+      return { deviceId: device.deviceId, label: rawLabel };
+    });
+}
+
+/**
+ * 选择默认输入设备 ID：优先保留用户当前选择，否则跟随系统默认麦克风。
+ *
+ * 浏览器返回的具体设备顺序是内部固定序（看上去像按名称排序），直接取第一个
+ * 会选到与系统设置无关的设备。Chrome/Edge 用 deviceId="default" 表达"系统当前
+ * 默认"，因此优先选它；Firefox 不暴露该条目，但其枚举首项即系统默认，兜底取首项。
  */
 export function pickPreferredAudioInputId(inputs: Array<{ deviceId: string; label: string }>, currentId: string) {
   if (currentId && inputs.some((item) => item.deviceId === currentId)) {
     return currentId;
   }
   return (
-    inputs.find((item) => item.deviceId && item.deviceId !== "default" && item.deviceId !== "communications")?.deviceId ||
+    inputs.find((item) => item.deviceId === "default")?.deviceId ||
+    inputs.find((item) => item.deviceId === "communications")?.deviceId ||
     inputs.find((item) => item.deviceId)?.deviceId ||
     ""
   );

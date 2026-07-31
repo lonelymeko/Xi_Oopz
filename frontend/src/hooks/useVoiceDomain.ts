@@ -1,7 +1,7 @@
 import type { MutableRefObject } from "react";
 
 import type { RTCController } from "../rtc";
-import { pickPreferredAudioInputId } from "../utils/live";
+import { mapAudioInputDevices, pickPreferredAudioInputId } from "../utils/live";
 import type { AudioInputOption } from "../types/live";
 
 /**
@@ -249,9 +249,7 @@ export function useVoiceDomain(options: UseVoiceDomainOptions) {
       .then(async () => {
         if (!navigator.mediaDevices?.enumerateDevices) return;
         const devices = await navigator.mediaDevices.enumerateDevices();
-        const nextInputs = devices
-          .filter((device) => device.kind === "audioinput")
-          .map((device, index) => ({ deviceId: device.deviceId, label: device.label || `麦克风 ${index + 1}` }));
+        const nextInputs = mapAudioInputDevices(devices);
         setAudioInputs(nextInputs);
         setSelectedAudioInputId((current) => pickPreferredAudioInputId(nextInputs, current));
       })

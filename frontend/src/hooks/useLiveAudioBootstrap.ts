@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import type { MutableRefObject } from "react";
 
 import type { RTCController } from "../rtc";
-import { pickPreferredAudioInputId } from "../utils/live";
+import { mapAudioInputDevices, pickPreferredAudioInputId } from "../utils/live";
 import type { AudioInputOption } from "../types/live";
 
 /**
@@ -56,12 +56,7 @@ export function useLiveAudioBootstrap(options: UseLiveAudioBootstrapOptions) {
       try {
         const devices = await navigator.mediaDevices.enumerateDevices();
         if (disposed) return;
-        const nextInputs = devices
-          .filter((device) => device.kind === "audioinput")
-          .map((device, index) => ({
-            deviceId: device.deviceId,
-            label: device.label || `麦克风 ${index + 1}`,
-          }));
+        const nextInputs = mapAudioInputDevices(devices);
         setAudioInputs(nextInputs);
         setSelectedAudioInputId((current) => pickPreferredAudioInputId(nextInputs, current));
       } catch (error) {
@@ -114,12 +109,7 @@ export function useLiveAudioBootstrap(options: UseLiveAudioBootstrapOptions) {
       startupAudioStreamRef.current = stream;
       rtcRef.current?.primePrewarmedAudio(stream);
       const devices = await navigator.mediaDevices.enumerateDevices();
-      const nextInputs = devices
-        .filter((device) => device.kind === "audioinput")
-        .map((device, index) => ({
-          deviceId: device.deviceId,
-          label: device.label || `麦克风 ${index + 1}`,
-        }));
+      const nextInputs = mapAudioInputDevices(devices);
       setAudioInputs(nextInputs);
       setSelectedAudioInputId((current) => pickPreferredAudioInputId(nextInputs, current));
       setStatus("麦克风与音频设备已就绪");
