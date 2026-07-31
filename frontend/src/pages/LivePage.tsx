@@ -498,8 +498,6 @@ export function LivePage() {
         enterVoiceChannel={enterVoiceChannel}
         toggleMic={toggleMic}
         toggleDeafen={toggleDeafen}
-        audioOnlySharing={audioOnlySharing}
-        toggleAudioOnlyShare={toggleAudioOnlyShare}
         leaveVoice={leaveVoice}
         handleAudioInputChange={handleAudioInputChange}
         handleNoiseSuppressionChange={handleNoiseSuppressionChange}
@@ -552,6 +550,8 @@ export function LivePage() {
         setScreeningTitleInput={setScreeningTitleInput}
         setMaximizedScreenKey={setMaximizedScreenKey}
         toggleScreenShare={toggleScreenShare}
+        audioOnlySharing={audioOnlySharing}
+        toggleAudioOnlyShare={toggleAudioOnlyShare}
         appendEmoji={appendEmoji}
         sendMessage={sendMessage}
         onScreeningReplace={(url, title) => {

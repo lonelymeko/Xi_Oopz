@@ -236,10 +236,12 @@ export class RTCController {
       restrictOwnAudio?: boolean;
     };
 
-    // 多数浏览器不允许 video:false 的 getDisplayMedia，
-    // 因此照常请求视频源，拿到后立即停掉视频轨、只保留音轨。
+    // 浏览器不支持纯音频的 getDisplayMedia（video:false 会直接抛错），
+    // 采集来源选择器无法跳过——这是“页面不能静默捕获系统声音”的安全约束。
+    // 这里用 displaySurface 提示让选择器直接落在“整个屏幕”一栏
+    //（“同时分享系统音频”勾选框只在那一栏出现），拿到流后立刻停掉视频轨只留音轨。
     const stream = await navigator.mediaDevices.getDisplayMedia({
-      video: true,
+      video: { displaySurface: "monitor" },
       audio: this.buildShareAudioConstraints(supported),
       systemAudio: "include",
       selfBrowserSurface: "exclude",

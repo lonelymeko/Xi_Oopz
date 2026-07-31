@@ -3,6 +3,7 @@ import type { RefObject } from "react";
 import { MemberSection, RemoteAudioLayer, VoiceAvatarOrb } from "./voiceAndMember";
 import { ScreeningPlaylistSection, ScreeningRoomPanel } from "./screening";
 import {
+  AudioShareIcon,
   ChatIcon,
   DownloadIcon,
   ExpandIcon,
@@ -48,6 +49,7 @@ export function LiveMainPanel(props: {
   wsConnected: boolean;
   status: string;
   screenSharing: boolean;
+  audioOnlySharing: boolean;
   voiceMembersList: PresenceMember[];
   voiceMembers: Map<number, PresenceMember>;
   remoteMedia: Map<number, RemoteMedia>;
@@ -80,6 +82,7 @@ export function LiveMainPanel(props: {
   setScreeningTitleInput: (value: string) => void;
   setMaximizedScreenKey: (value: string | null) => void;
   toggleScreenShare: () => Promise<void>;
+  toggleAudioOnlyShare: () => Promise<void>;
   appendEmoji: (emoji: string) => void;
   sendMessage: (body: string) => Promise<void>;
   onScreeningReplace: (url: string, title: string) => void;
@@ -98,6 +101,7 @@ export function LiveMainPanel(props: {
     wsConnected,
     status,
     screenSharing,
+    audioOnlySharing,
     voiceMembersList,
     voiceMembers,
     remoteMedia,
@@ -130,6 +134,7 @@ export function LiveMainPanel(props: {
     setScreeningTitleInput,
     setMaximizedScreenKey,
     toggleScreenShare,
+    toggleAudioOnlyShare,
     appendEmoji,
     sendMessage,
     onScreeningReplace,
@@ -185,6 +190,16 @@ export function LiveMainPanel(props: {
               <div className="voice-presence-dock__actions">
                 <span className={`connection-badge ${wsConnected ? "connection-badge--online" : ""}`}>{status}</span>
                 <button className="action-pill">邀请/分享</button>
+                <button
+                  className={`round-action ${audioOnlySharing ? "round-action--active" : ""}`}
+                  title={audioOnlySharing ? "停止共享音频" : "只共享音频（不共享画面）"}
+                  aria-label={audioOnlySharing ? "停止共享音频" : "只共享音频"}
+                  aria-pressed={audioOnlySharing}
+                  disabled={!currentVoiceChannelId}
+                  onClick={() => void toggleAudioOnlyShare()}
+                >
+                  <AudioShareIcon />
+                </button>
                 <button
                   className={`round-action ${screenSharing ? "round-action--active" : ""}`}
                   title={screenSharing ? "停止屏幕共享" : "开始屏幕共享"}

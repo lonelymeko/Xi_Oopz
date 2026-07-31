@@ -1,7 +1,6 @@
 import type { RefObject } from "react";
 
 import {
-  AudioShareIcon,
   CopyIcon,
   HangupIcon,
   HashIcon,
@@ -47,8 +46,6 @@ export function ChannelSidebar(props: {
   showHeadphoneSettings: boolean;
   showProfileMenu: boolean;
   currentVoiceChannelAvailable: boolean;
-  audioOnlySharing: boolean;
-  toggleAudioOnlyShare: () => Promise<void>;
   setCreatingDomain: (value: boolean) => void;
   setShowProfileMenu: (value: boolean | ((current: boolean) => boolean)) => void;
   setChannelComposerType: (value: "text" | "voice" | "screening" | null) => void;
@@ -93,8 +90,6 @@ export function ChannelSidebar(props: {
     showHeadphoneSettings,
     showProfileMenu,
     currentVoiceChannelAvailable,
-    audioOnlySharing,
-    toggleAudioOnlyShare,
     setCreatingDomain,
     setShowProfileMenu,
     setChannelComposerType,
@@ -266,16 +261,6 @@ export function ChannelSidebar(props: {
                   </div>
                 ) : null}
               </div>
-              <button
-                className={`sidebar-icon-button ${audioOnlySharing ? "sidebar-icon-button--active" : ""}`}
-                title={audioOnlySharing ? "停止共享系统音频" : "只共享系统音频（不共享画面）"}
-                aria-label={audioOnlySharing ? "停止共享系统音频" : "只共享系统音频"}
-                aria-pressed={audioOnlySharing}
-                disabled={!currentVoiceChannelAvailable}
-                onClick={() => void toggleAudioOnlyShare()}
-              >
-                <AudioShareIcon />
-              </button>
               <button
                 className="sidebar-icon-button sidebar-icon-button--danger"
                 title="挂断通话"
