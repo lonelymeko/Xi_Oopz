@@ -285,6 +285,20 @@ export function PlusIcon() {
   );
 }
 
+export function AudioShareIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M4 10v4M8 7v10M12 4.5v15M16 8v8M20 10.5v3"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 export function CloseIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">

@@ -14,9 +14,12 @@ type UseScreeningDomainOptions = {
   firstTextChannel: Channel | null;
   screenSharing: boolean;
   screenSharePreset: { surface: ScreenShareOptions["surface"]; audioMode: ScreenShareOptions["audioMode"] };
+  audioOnlySharing: boolean;
   rtcRef: MutableRefObject<{
     stopScreenShare: (silent: boolean) => Promise<void>;
     startScreenShare: (options: ScreenShareOptions) => Promise<void>;
+    startAudioOnlyShare: () => Promise<void>;
+    stopAudioOnlyShare: () => Promise<void>;
   } | null>;
   socketRef: MutableRefObject<{ send: (type: string, payload: unknown) => void } | null>;
   screeningJoinDedupRef: MutableRefObject<{ channelId: number | null; until: number }>;
@@ -45,6 +48,7 @@ export function useScreeningDomain(options: UseScreeningDomainOptions) {
     firstTextChannel,
     screenSharing,
     screenSharePreset,
+    audioOnlySharing,
     rtcRef,
     socketRef,
     screeningJoinDedupRef,
@@ -123,13 +127,6 @@ export function useScreeningDomain(options: UseScreeningDomainOptions) {
       await rtcRef.current?.startScreenShare(options);
       setScreenSharing(true);
       setShowScreenShareSheet(false);
-      if (options.surface === "screen" && options.audioMode === "share") {
-        pushNotice(
-          "info",
-          "正在共享系统音频",
-          "系统音频可能把远端通话声、通知声一起带出去，建议佩戴耳机；浏览器支持时会尝试启用 restrictOwnAudio 和 suppressLocalAudioPlayback 兜底。",
-        );
-      }
       socketRef.current?.send("screen.state", {
         channelId: currentVoiceChannelId,
         screenSharing: true,
@@ -142,10 +139,37 @@ export function useScreeningDomain(options: UseScreeningDomainOptions) {
     }
   }
 
+  /**
+   * 切换“仅共享系统音频”：直接弹系统选择器，不进入屏幕共享状态。
+   */
+  async function toggleAudioOnlyShare() {
+    if (!currentVoiceChannelId) {
+      pushNotice("info", "请先进入语音频道", "共享系统音频需要先加入一个语音频道");
+      return;
+    }
+    try {
+      if (audioOnlySharing) {
+        await rtcRef.current?.stopAudioOnlyShare();
+        setStatus("已停止共享系统音频");
+        return;
+      }
+      await rtcRef.current?.startAudioOnlyShare();
+      setStatus("正在共享系统音频");
+    } catch (error) {
+      // 用户在系统选择器点取消属于正常操作，不当成错误弹窗
+      if (error instanceof DOMException && (error.name === "NotAllowedError" || error.name === "AbortError")) {
+        return;
+      }
+      console.error(error);
+      showError(error, "共享系统音频失败", "请在系统选择器里勾选“分享音频”后重试");
+    }
+  }
+
   return {
     firstTextChannel,
     leaveScreeningChannel,
     toggleScreenShare,
     confirmScreenShare,
+    toggleAudioOnlyShare,
   };
 }

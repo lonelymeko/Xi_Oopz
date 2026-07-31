@@ -65,6 +65,7 @@ export class RTCController {
   private localAudioStream: MediaStream | null = null;
   private localMicStream: MediaStream | null = null;
   private localScreenStream: MediaStream | null = null;
+  private localScreenAudioStream: MediaStream | null = null;
   private prewarmedAudioStream: MediaStream | null = null;
   private audioAcquirePromise: Promise<MediaStream> | null = null;
   private prewarmReleaseTimer: number | null = null;
@@ -103,6 +104,7 @@ export class RTCController {
     private readonly onDiagnosticsChanged: (diagnostics: Map<number, PeerConnectionDiagnostics>) => void,
     private readonly onLocalAudioChanged: (stream: MediaStream | null) => void,
     private readonly onLocalScreenChanged: (stream: MediaStream | null) => void,
+    private readonly onLocalScreenAudioChanged: (sharing: boolean) => void,
     private readonly onNotice: (kind: "info" | "error", title: string, message: string) => void,
   ) {}
 
@@ -134,15 +136,18 @@ export class RTCController {
     this.stopTrackGroup(this.localMicStream);
     this.stopTrackGroup(this.prewarmedAudioStream);
     this.stopTrackGroup(this.localScreenStream);
+    this.stopTrackGroup(this.localScreenAudioStream);
     this.localAudioStream = null;
     this.localMicStream = null;
     this.prewarmedAudioStream = null;
     this.localScreenStream = null;
+    this.localScreenAudioStream = null;
     this.screenAudioEnabled = false;
     this.peerEnsurePromises.clear();
     this.clearPrewarmReleaseTimer();
     this.onLocalAudioChanged(null);
     this.onLocalScreenChanged(null);
+    this.onLocalScreenAudioChanged(false);
     this.log("leaveVoice:completed", { elapsedMs: Math.round(performance.now() - startedAt) });
   }
 
@@ -204,8 +209,80 @@ export class RTCController {
     this.schedulePrewarmRelease();
   }
 
+  // 共享音频的采集约束。这里不再设置 suppressLocalAudioPlayback：
+  // 它会让本机扬声器静音，共享者自己听不到正在共享的声音（一起看片时尤其难受）。
+  // 防止把远端通话声再录进去交给浏览器自身的 restrictOwnAudio + 回声消除处理。
+  private buildShareAudioConstraints(
+    supported: MediaTrackSupportedConstraints & { restrictOwnAudio?: boolean },
+  ): Record<string, unknown> {
+    const audioConstraints: Record<string, unknown> = {};
+    if (supported.restrictOwnAudio) {
+      audioConstraints.restrictOwnAudio = true;
+    }
+    return audioConstraints;
+  }
+
+  /**
+   * 仅共享系统音频：走 getDisplayMedia 拿到音轨后立刻丢弃视频轨，
+   * 因此不进入“正在共享屏幕”状态（不发 screen.state、对端不显示画面），
+   * 音频通过既有的 Web Audio 混音并入本端上行轨道，对端直接就能听到。
+   */
+  async startAudioOnlyShare() {
+    if (this.localScreenAudioStream) return;
+    if (this.localScreenStream) {
+      throw new Error("正在共享屏幕，请先停止屏幕共享再单独共享音频");
+    }
+    const supported = navigator.mediaDevices.getSupportedConstraints() as MediaTrackSupportedConstraints & {
+      restrictOwnAudio?: boolean;
+    };
+
+    // 多数浏览器不允许 video:false 的 getDisplayMedia，
+    // 因此照常请求视频源，拿到后立即停掉视频轨、只保留音轨。
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: this.buildShareAudioConstraints(supported),
+      systemAudio: "include",
+      selfBrowserSurface: "exclude",
+    } as DisplayMediaStreamOptions);
+
+    stream.getVideoTracks().forEach((track) => {
+      track.stop();
+      stream.removeTrack(track);
+    });
+
+    const audioTracks = stream.getAudioTracks();
+    if (!audioTracks.length) {
+      this.stopTrackGroup(stream);
+      throw new Error("未捕获到音频，请在系统选择器里勾选“分享音频”后重试");
+    }
+
+    this.localScreenAudioStream = stream;
+    audioTracks.forEach((track) => {
+      track.addEventListener("ended", () => {
+        void this.stopAudioOnlyShare();
+      });
+    });
+
+    this.onLocalScreenAudioChanged(true);
+    await this.syncLocalAudioState();
+  }
+
+  async stopAudioOnlyShare() {
+    if (!this.localScreenAudioStream) return;
+    this.stopTrackGroup(this.localScreenAudioStream);
+    this.localScreenAudioStream = null;
+    this.onLocalScreenAudioChanged(false);
+    await this.syncLocalAudioState();
+  }
+
+  isAudioOnlySharing() {
+    return Boolean(this.localScreenAudioStream);
+  }
+
   async startScreenShare(options: ScreenShareOptions) {
     if (this.localScreenStream) return;
+    // 屏幕共享自带音频通道，先停掉独立的音频共享，避免同一路系统音频被采集两次
+    await this.stopAudioOnlyShare();
     const supported = navigator.mediaDevices.getSupportedConstraints() as MediaTrackSupportedConstraints & {
       restrictOwnAudio?: boolean;
     };
@@ -220,25 +297,13 @@ export class RTCController {
       displayOptions.selfBrowserSurface = "include";
       displayOptions.systemAudio = "exclude";
       if (shareAudio) {
-        const audioConstraints: Record<string, unknown> = {
-          suppressLocalAudioPlayback: true,
-        };
-        if (supported.restrictOwnAudio) {
-          audioConstraints.restrictOwnAudio = true;
-        }
-        displayOptions.audio = audioConstraints;
+        displayOptions.audio = this.buildShareAudioConstraints(supported);
       }
     } else {
       displayOptions.selfBrowserSurface = "exclude";
       displayOptions.systemAudio = shareAudio ? "include" : "exclude";
       if (shareAudio) {
-        const audioConstraints: Record<string, unknown> = {
-          suppressLocalAudioPlayback: true,
-        };
-        if (supported.restrictOwnAudio) {
-          audioConstraints.restrictOwnAudio = true;
-        }
-        displayOptions.audio = audioConstraints;
+        displayOptions.audio = this.buildShareAudioConstraints(supported);
       }
     }
 
@@ -632,8 +697,15 @@ export class RTCController {
     this.mixDestination = null;
   }
 
+  // 屏幕共享音频和“仅共享系统音频”两条来源等价，都算作本端正在发送的共享音频
+  private getShareAudioTrack() {
+    const fromScreen = this.localScreenStream?.getAudioTracks().find((track) => track.readyState === "live");
+    if (fromScreen) return fromScreen;
+    return this.localScreenAudioStream?.getAudioTracks().find((track) => track.readyState === "live") || null;
+  }
+
   private hasLiveScreenAudio() {
-    return Boolean(this.localScreenStream?.getAudioTracks().some((track) => track.readyState === "live"));
+    return Boolean(this.getShareAudioTrack());
   }
 
   private updateMixGains() {
@@ -675,8 +747,8 @@ export class RTCController {
       this.micGainNode.connect(this.mixDestination);
     }
 
-    const screenTrack = this.localScreenStream?.getAudioTracks()[0] || null;
-    this.screenAudioEnabled = Boolean(screenTrack && screenTrack.readyState === "live");
+    const screenTrack = this.getShareAudioTrack();
+    this.screenAudioEnabled = Boolean(screenTrack);
     if (screenTrack) {
       this.screenSourceNode = this.mixContext.createMediaStreamSource(new MediaStream([screenTrack]));
       this.screenGainNode = this.mixContext.createGain();

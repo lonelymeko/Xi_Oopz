@@ -65,6 +65,7 @@ export function LivePage() {
   const [noiseSuppressionEnabled, setNoiseSuppressionEnabled] = useState(true);
   const [remoteVolume, setRemoteVolume] = useState(72);
   const [screenSharing, setScreenSharing] = useState(false);
+  const [audioOnlySharing, setAudioOnlySharing] = useState(false);
   const [showScreenShareSheet, setShowScreenShareSheet] = useState(false);
   const [screenSharePreset, setScreenSharePreset] = useState<ScreenSharePreset>({ surface: "tab", audioMode: "share" });
   const [messageDraft, setMessageDraft] = useState("");
@@ -266,7 +267,7 @@ export function LivePage() {
     refreshPresence,
   });
 
-  const { leaveScreeningChannel, toggleScreenShare, confirmScreenShare } = useScreeningDomain({
+  const { leaveScreeningChannel, toggleScreenShare, confirmScreenShare, toggleAudioOnlyShare } = useScreeningDomain({
     activeChannelRef,
     currentVoiceChannelIdRef,
     currentVoiceChannel,
@@ -274,6 +275,7 @@ export function LivePage() {
     firstTextChannel,
     screenSharing,
     screenSharePreset,
+    audioOnlySharing,
     rtcRef,
     socketRef,
     screeningJoinDedupRef,
@@ -390,6 +392,7 @@ export function LivePage() {
   });
 
   useLiveRuntime({
+    setAudioOnlySharing,
     sessionToken: session?.token || null,
     userId: user?.id || null,
     domainId: bootstrap?.domain.id || null,
@@ -495,6 +498,8 @@ export function LivePage() {
         enterVoiceChannel={enterVoiceChannel}
         toggleMic={toggleMic}
         toggleDeafen={toggleDeafen}
+        audioOnlySharing={audioOnlySharing}
+        toggleAudioOnlyShare={toggleAudioOnlyShare}
         leaveVoice={leaveVoice}
         handleAudioInputChange={handleAudioInputChange}
         handleNoiseSuppressionChange={handleNoiseSuppressionChange}

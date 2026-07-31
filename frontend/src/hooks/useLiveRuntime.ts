@@ -41,6 +41,7 @@ type UseLiveRuntimeOptions = {
   setPeerDiagnostics: (value: Map<number, import("../types").PeerConnectionDiagnostics>) => void;
   setLocalAudioStream: (value: MediaStream | null) => void;
   setLocalScreenStream: (value: MediaStream | null) => void;
+  setAudioOnlySharing: (value: boolean) => void;
   pushNotice: (kind: "error" | "info", title: string, message: string) => void;
   voiceLog: (label: string, extra?: Record<string, unknown>) => void;
   screeningLog: (label: string, extra?: Record<string, unknown>) => void;
@@ -82,6 +83,7 @@ export function useLiveRuntime(options: UseLiveRuntimeOptions) {
     setPeerDiagnostics,
     setLocalAudioStream,
     setLocalScreenStream,
+    setAudioOnlySharing,
     pushNotice,
     voiceLog,
     screeningLog,
@@ -319,6 +321,7 @@ export function useLiveRuntime(options: UseLiveRuntimeOptions) {
       (diagnostics) => setPeerDiagnostics(new Map(diagnostics)),
       (stream) => setLocalAudioStream(stream),
       (stream) => setLocalScreenStream(stream),
+      (sharing) => setAudioOnlySharing(sharing),
       (kind, title, message) => {
         setStatus(message);
         pushNotice(kind, title, message);
@@ -358,6 +361,7 @@ export function useLiveRuntime(options: UseLiveRuntimeOptions) {
     setPeerDiagnostics,
     setLocalAudioStream,
     setLocalScreenStream,
+    setAudioOnlySharing,
     setStatus,
     pushNotice,
     rtcRef,
