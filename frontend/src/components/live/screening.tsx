@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { PlayIcon, TrashIcon } from "./icons";
+import { DownloadIcon, PlayIcon, TrashIcon } from "./icons";
 import { buildApiUrl } from "../../config/runtime";
 import type { ScreeningPlaylistItem, ScreeningSnapshot, User, Channel } from "../../types";
 import { isLikelyLiveScreeningURL } from "../../utils/live";
@@ -54,6 +54,9 @@ export function ScreeningRoomPanel({
   });
   const [imageCurrentTime, setImageCurrentTime] = useState(0);
   const [proxyImageFrames, setProxyImageFrames] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
+  const [resolving, setResolving] = useState(false);
+  const downloadAbortRef = useRef<AbortController | null>(null);
 
   const state = snapshot?.state || null;
   const viewers = snapshot?.viewers || [];
@@ -452,13 +455,98 @@ export function ScreeningRoomPanel({
     void imageStageRef.current?.requestFullscreen?.();
   };
 
+  /**
+   * 下载当前放映的视频到本地。
+   * 直链走后端代理的 download=1（同源 + attachment，浏览器直接落盘）；
+   * HLS 在前端经代理抓取全部分片拼成单个文件保存（沿用 media proxy 这套取流链路）。
+   */
+  async function handleDownloadCurrent() {
+    if (downloadAbortRef.current) {
+      downloadAbortRef.current.abort();
+      return;
+    }
+    const rawUrl = state?.currentUrl?.trim();
+    if (!rawUrl) return;
+    if (isLiveScreening) {
+      onError("暂不支持下载", "直播流没有固定结尾，无法下载为本地文件");
+      return;
+    }
+
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      onError("暂不支持下载", "当前播放地址不是可下载的直链");
+      return;
+    }
+
+    const fallbackName = (state?.currentTitle || "").trim() || decodeURIComponent(parsed.pathname.split("/").pop() || "") || "video";
+
+    const controller = new AbortController();
+    downloadAbortRef.current = controller;
+    setDownloadProgress(0);
+    try {
+      if (!isLikelyHLSManifestPath(parsed.pathname)) {
+        // 直链：优先浏览器直连源站取流（不吃后端流量），源站无 CORS 时才回退后端代理落盘
+        const blob = await downloadDirectFile(parsed.toString(), controller.signal, (done, total) => {
+          setDownloadProgress(total > 0 ? Math.floor((done / total) * 100) : 0);
+        });
+        if (blob) {
+          const ext = (parsed.pathname.match(/\.[a-z0-9]{2,4}$/i)?.[0] || ".mp4").toLowerCase();
+          saveBlobToLocal(blob, `${fallbackName.replace(/\.[a-z0-9]{2,4}$/i, "")}${ext}`);
+        } else {
+          const anchor = document.createElement("a");
+          anchor.href = buildApiUrl(`/api/media/proxy?segments=1&download=1&url=${encodeURIComponent(parsed.toString())}`);
+          anchor.download = fallbackName;
+          anchor.rel = "noopener";
+          document.body.appendChild(anchor);
+          anchor.click();
+          anchor.remove();
+        }
+        return;
+      }
+
+      const blobInfo = await assembleHLSDownload(parsed.toString(), controller.signal, (done, total) => {
+        setDownloadProgress(total > 0 ? Math.floor((done / total) * 100) : 0);
+      });
+      saveBlobToLocal(blobInfo.blob, `${fallbackName.replace(/\.m3u8$/i, "")}${blobInfo.extension}`);
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        console.error(error);
+        onError("下载失败", error instanceof Error ? error.message : "拉取视频分片失败，请稍后重试");
+      }
+    } finally {
+      downloadAbortRef.current = null;
+      setDownloadProgress(null);
+    }
+  }
+
   async function prepareSubmissionInput() {
     const url = urlInput.trim();
     if (!url) {
       onError("放映室操作失败", "请输入可直接播放的视频 URL");
       return null;
     }
-    return { url, title: titleInput.trim() };
+    // 已是直链就直接用；否则当作视频网页地址，交后端无头浏览器嗅探真实直链，
+    // 免去手动开发者工具找 m3u8 的过程。
+    if (isDirectMediaUrl(url)) {
+      return { url, title: titleInput.trim() };
+    }
+    setResolving(true);
+    try {
+      const resp = await fetch(buildApiUrl(`/api/media/resolve?url=${encodeURIComponent(url)}`));
+      const data = (await resp.json()) as { mediaUrl?: string; error?: string };
+      if (!resp.ok || !data.mediaUrl) {
+        onError("解析失败", data.error || "未能从该网页解析出可播放的视频直链");
+        return null;
+      }
+      return { url: data.mediaUrl, title: titleInput.trim() };
+    } catch (error) {
+      onError("解析失败", error instanceof Error ? error.message : "解析视频网页时出错");
+      return null;
+    } finally {
+      setResolving(false);
+    }
   }
 
   return (
@@ -540,6 +628,18 @@ export function ScreeningRoomPanel({
               <media-community-skin></media-community-skin>
             </media-player>
           )}
+          {state?.currentUrl && !isImageSequence ? (
+            <button
+              type="button"
+              className="screening-stage__download"
+              title={downloadProgress != null ? "取消下载" : "下载到本地"}
+              aria-label={downloadProgress != null ? "取消下载" : "下载到本地"}
+              onClick={() => void handleDownloadCurrent()}
+            >
+              <DownloadIcon />
+              {downloadProgress != null ? <span>{downloadProgress}%</span> : null}
+            </button>
+          ) : null}
           {!state?.currentUrl ? <div className="screening-stage__empty">输入直链视频 URL 后即可开始放映</div> : null}
         </div>
       </div>
@@ -549,13 +649,14 @@ export function ScreeningRoomPanel({
           <input
             value={urlInput}
             onChange={(event) => onUrlInputChange(event.target.value)}
-            placeholder="输入可直接播放的视频 URL，例如 https://.../demo.mp4"
+            placeholder="视频直链或视频网页地址（网页会自动解析）"
           />
           <input value={titleInput} onChange={(event) => onTitleInputChange(event.target.value)} placeholder="可选标题" />
         </div>
         <div className="screening-composer__actions">
           <button
             className="action-pill"
+            disabled={resolving}
             onClick={() => {
               void (async () => {
                 const next = await prepareSubmissionInput();
@@ -564,10 +665,11 @@ export function ScreeningRoomPanel({
               })();
             }}
           >
-            替换当前并开始
+            {resolving ? "解析中…" : "替换当前并开始"}
           </button>
           <button
             className="action-pill"
+            disabled={resolving}
             onClick={() => {
               void (async () => {
                 const next = await prepareSubmissionInput();
@@ -603,6 +705,143 @@ function buildScreeningPlaybackUrl(rawUrl?: string) {
 
 function buildProxiedMediaUrl(rawUrl: string) {
   return buildApiUrl(`/api/media/proxy?segments=1&url=${encodeURIComponent(rawUrl)}`);
+}
+
+/**
+ * 经 media proxy 抓取 HLS 全部分片并拼成单个可保存文件。
+ * TS 分片直接顺序拼接即合法 TS 流；fMP4 由 EXT-X-MAP 的 init 段 + 分片拼接。
+ */
+export async function assembleHLSDownload(
+  manifestUrl: string,
+  signal: AbortSignal,
+  onProgress: (done: number, total: number) => void,
+): Promise<{ blob: Blob; extension: string }> {
+  // 优先浏览器直连源站抓取（分片不经过后端），CORS 被拦时才回退后端代理。
+  // 返回 [文本, 重定向后的最终地址]，最终地址用于把相对分片解析成绝对地址。
+  const fetchTextDirectFirst = async (url: string): Promise<[string, string]> => {
+    try {
+      const direct = await fetch(url, { signal });
+      if (direct.ok) return [await direct.text(), direct.url || url];
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") throw error;
+    }
+    const proxied = await fetch(buildApiUrl(`/api/media/proxy.m3u8?segments=1&url=${encodeURIComponent(url)}`), { signal });
+    if (!proxied.ok) throw new Error(`清单拉取失败(${proxied.status})`);
+    return [await proxied.text(), url];
+  };
+
+  const fetchBytesDirectFirst = async (url: string): Promise<ArrayBuffer> => {
+    try {
+      const direct = await fetch(url, { signal });
+      if (direct.ok) return direct.arrayBuffer();
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") throw error;
+    }
+    const proxied = await fetch(buildApiUrl(`/api/media/proxy?segments=1&url=${encodeURIComponent(url)}`), { signal });
+    if (!proxied.ok) throw new Error(`分片拉取失败(${proxied.status})`);
+    return proxied.arrayBuffer();
+  };
+
+  const absolutize = (ref: string, base: string) => {
+    try {
+      return new URL(ref, base).toString();
+    } catch {
+      return ref;
+    }
+  };
+
+  let [manifest, manifestBase] = await fetchTextDirectFirst(manifestUrl);
+
+  // 多码率主清单：取第一个变体，按当前清单地址解析成绝对地址后再取一层
+  if (manifest.includes("#EXT-X-STREAM-INF")) {
+    const lines = manifest.split(/\r?\n/);
+    const variant = lines.find((line, index) => index > 0 && lines[index - 1].startsWith("#EXT-X-STREAM-INF") && line.trim() && !line.startsWith("#"));
+    if (!variant) throw new Error("主清单里没有可用的码率变体");
+    [manifest, manifestBase] = await fetchTextDirectFirst(absolutize(variant.trim(), manifestBase));
+  }
+
+  if (!manifest.includes("#EXT-X-ENDLIST")) {
+    throw new Error("直播/无结尾的流无法下载为本地文件");
+  }
+
+  const lines = manifest.split(/\r?\n/).map((line) => line.trim());
+  const parts: string[] = [];
+  const mapMatch = manifest.match(/#EXT-X-MAP:[^\n]*URI="([^"]+)"/);
+  if (mapMatch) parts.push(absolutize(mapMatch[1], manifestBase));
+  for (const line of lines) {
+    if (line && !line.startsWith("#")) parts.push(absolutize(line, manifestBase));
+  }
+  if (!parts.length) throw new Error("清单里没有可下载的分片");
+
+  const buffers: ArrayBuffer[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    buffers.push(await fetchBytesDirectFirst(parts[i]));
+    onProgress(i + 1, parts.length);
+  }
+
+  const firstSegment = parts[mapMatch ? 1 : 0] || "";
+  const isFragmentedMP4 = Boolean(mapMatch) || /\.(m4s|mp4)(\?|$)/i.test(firstSegment);
+  return {
+    blob: new Blob(buffers, { type: isFragmentedMP4 ? "video/mp4" : "video/mp2t" }),
+    extension: isFragmentedMP4 ? ".mp4" : ".ts",
+  };
+}
+
+/**
+ * 下载单文件直链（mp4 等）：优先浏览器直连源站取流拼 blob（不吃后端流量），
+ * 源站无 CORS 被拦时返回 null，交由调用方回退后端 attachment 落盘。
+ */
+async function downloadDirectFile(
+  url: string,
+  signal: AbortSignal,
+  onProgress: (done: number, total: number) => void,
+): Promise<Blob | null> {
+  let resp: Response;
+  try {
+    resp = await fetch(url, { signal });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    return null; // CORS/网络被拦，回退后端
+  }
+  if (!resp.ok || !resp.body) return null;
+
+  const total = Number(resp.headers.get("Content-Length") || 0);
+  const reader = resp.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      chunks.push(value);
+      received += value.length;
+      onProgress(received, total);
+    }
+  }
+  return new Blob(chunks as BlobPart[], { type: resp.headers.get("Content-Type") || "video/mp4" });
+}
+
+function saveBlobToLocal(blob: Blob, filename: string) {
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 30000);
+}
+
+/** 是否已是可直接播放的媒体直链（否则视为需嗅探的视频网页地址）。 */
+function isDirectMediaUrl(raw: string) {
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return true;
+    if (isLikelyHLSManifestPath(parsed.pathname)) return true;
+    return /\.(mp4|m3u8|flv|mkv|webm|mov|ts|m4s)(\?|$)/i.test(parsed.pathname);
+  } catch {
+    return true;
+  }
 }
 
 function isLikelyHLSManifestPath(pathname: string) {

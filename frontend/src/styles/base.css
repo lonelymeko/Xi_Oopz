@@ -559,6 +559,37 @@ button {
   accent-color: var(--teal);
 }
 
+.screening-stage__download {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 999px;
+  background: rgba(6, 9, 15, 0.78);
+  color: var(--text);
+  font-size: 0.74rem;
+  opacity: 0;
+  transition: opacity 140ms ease, background 140ms ease;
+}
+
+.screening-stage__video-wrap:hover .screening-stage__download,
+.screening-stage__download:focus-visible {
+  opacity: 1;
+}
+
+.screening-stage__download:hover {
+  background: rgba(6, 9, 15, 0.92);
+}
+
+.screening-stage__download svg {
+  width: 16px;
+  height: 16px;
+}
+
 .screening-stage__empty {
   position: absolute;
   inset: 0;
