@@ -74,6 +74,44 @@ jobs:
           overwrite: true
           strip_components: 0
 
+      - name: Ensure headless Chrome for media resolver
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          port: ${{ secrets.SERVER_PORT }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          passphrase: ${{ secrets.SERVER_SSH_PASSPHRASE }}
+          script: |
+            set -e
+            # /api/media/resolve 用无头 chrome 嗅探视频直链。装完整 chrome-for-testing
+            # （从 npmmirror 国内 CDN 下，非 snap、含专有编解码），软链到 google-chrome
+            # 让 chromedp 默认就能找到；系统运行库走服务器已配置的国内 apt 镜像。
+            CHROME_DIR=/opt/oopz-chrome
+            CHROME_BIN="$CHROME_DIR/chrome-linux64/chrome"
+            CHROME_VER=130.0.6723.116
+            if [ -x "$CHROME_BIN" ]; then
+              echo "chrome already present: $CHROME_BIN"
+            else
+              if command -v apt-get >/dev/null 2>&1; then
+                sudo apt-get update -y || true
+                sudo apt-get install -y --no-install-recommends \
+                  ca-certificates unzip fonts-liberation \
+                  libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
+                  libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+                  libgbm1 libpango-1.0-0 libcairo2 libasound2 libatspi2.0-0 libxshmfence1 || true
+              fi
+              sudo mkdir -p "$CHROME_DIR"
+              TMP=$(mktemp -d)
+              curl -fsSL -o "$TMP/chrome.zip" \
+                "https://cdn.npmmirror.com/binaries/chrome-for-testing/${CHROME_VER}/linux64/chrome-linux64.zip"
+              sudo unzip -oq "$TMP/chrome.zip" -d "$CHROME_DIR"
+              sudo chmod +x "$CHROME_BIN"
+              rm -rf "$TMP"
+            fi
+            sudo ln -sf "$CHROME_BIN" /usr/local/bin/google-chrome
+            google-chrome --version || true
+
       - name: Promote artifacts and restart oopz-live service
         uses: appleboy/ssh-action@v1.0.3
         with:

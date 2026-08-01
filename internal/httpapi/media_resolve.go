@@ -120,6 +120,9 @@ func resolveMediaOnce(ctx context.Context, pageURL string) (string, string, erro
 		// 不关的话子框架是独立 target，主 target 的 ListenTarget 收不到它的网络事件。
 		chromedp.Flag("disable-site-isolation-trials", true),
 		chromedp.Flag("disable-features", "IsolateOrigins,site-per-process"),
+		// 解析网关/取流 CDN 常用自签或不被标准 chrome 认可的证书（如 :8443 上的 wasm 主机），
+		// 不忽略证书错误会挡掉解密脚本导致抓不到直链。仅用于只读嗅探，不落地数据。
+		chromedp.Flag("ignore-certificate-errors", true),
 		chromedp.UserAgent(mediaResolveUA),
 	)
 	if mediaResolveProxy != "" {
