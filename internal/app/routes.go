@@ -41,6 +41,8 @@ func RegisterRoutes(router *gin.Engine, application *App, hub *realtime.Hub) {
 	router.GET("/api/media/proxy.m3u8", handler.ProxyMedia)
 	router.OPTIONS("/api/media/proxy.m3u8", handler.ProxyMedia)
 	router.GET("/api/media/proxy", handler.ProxyMedia)
+	router.GET("/api/media/resolve", handler.ResolveMedia)
+	router.OPTIONS("/api/media/resolve", handler.ResolveMedia)
 	router.OPTIONS("/api/media/proxy", handler.ProxyMedia)
 	router.GET("/ws", handler.ServeWS)
 }

@@ -68,6 +68,15 @@ func (h *Handler) ProxyMedia(c *gin.Context) {
 	contentType := resp.Header.Get("Content-Type")
 	proxySegments := c.Query("segments") == "1"
 	proxyKey := c.Query("kind") == "key"
+	downloadMode := c.Query("download") == "1"
+	if downloadMode && !isHLSManifest(target, contentType) {
+		// 下载模式：任意内容原样透传，并带 attachment 让浏览器落盘而不是播放
+		copyMediaProxyResponseHeaders(c.Writer.Header(), resp.Header, target, contentType)
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", mediaDownloadFilename(target)))
+		c.Status(resp.StatusCode)
+		_, _ = io.Copy(c.Writer, resp.Body)
+		return
+	}
 	if isHLSManifest(target, contentType) {
 		body, err := readMediaProxyManifest(resp.Body)
 		if err != nil {
@@ -90,6 +99,15 @@ func (h *Handler) ProxyMedia(c *gin.Context) {
 	copyMediaProxyResponseHeaders(c.Writer.Header(), resp.Header, target, contentType)
 	c.Status(resp.StatusCode)
 	_, _ = io.Copy(c.Writer, resp.Body)
+}
+
+// 从目标 URL 路径推导下载文件名，取不出可用名时兜底 media。
+func mediaDownloadFilename(target *url.URL) string {
+	base := path.Base(target.Path)
+	if base == "" || base == "." || base == "/" {
+		return "media"
+	}
+	return base
 }
 
 func setMediaProxyCORS(c *gin.Context) {

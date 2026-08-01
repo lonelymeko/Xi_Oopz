@@ -139,3 +139,20 @@ func TestBlockedMediaProxyAddr(t *testing.T) {
 		})
 	}
 }
+
+func TestMediaDownloadFilename(t *testing.T) {
+	cases := map[string]string{
+		"https://cdn.example.com/videos/movie.mp4?sig=1": "movie.mp4",
+		"https://cdn.example.com/":                       "media",
+		"https://cdn.example.com":                        "media",
+	}
+	for raw, expected := range cases {
+		target, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := mediaDownloadFilename(target); got != expected {
+			t.Fatalf("mediaDownloadFilename(%q) = %q, want %q", raw, got, expected)
+		}
+	}
+}
