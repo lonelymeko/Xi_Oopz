@@ -165,7 +165,9 @@ func resolveMediaOnce(ctx context.Context, pageURL string) (string, string, erro
 
 	// 导航异步跑：媒体请求往往在页面完全加载前就发出，
 	// 阻塞等 Run 返回会错过监听窗口，因此边导航边等命中。
-	go func() { _ = chromedp.Run(runCtx, network.Enable(), chromedp.Navigate(pageURL)) }()
+	// 但导航错误必须留住——否则 chromium 没装/启动失败会被误报成“解析超时”。
+	navErr := make(chan error, 1)
+	go func() { navErr <- chromedp.Run(runCtx, network.Enable(), chromedp.Navigate(pageURL)) }()
 
 	// 部分播放器需要点一下才起播，尝试静音自动播放各层 iframe
 	tryPlay := func() {
@@ -183,6 +185,18 @@ func resolveMediaOnce(ctx context.Context, pageURL string) (string, string, erro
 		select {
 		case found := <-hit:
 			return found[0], found[1], nil
+		case err := <-navErr:
+			// 命中可能与导航返回同时到达，优先取命中
+			select {
+			case found := <-hit:
+				return found[0], found[1], nil
+			default:
+			}
+			if err != nil {
+				return "", "", errShort("解析失败：无法启动或打开页面（确认服务器已安装 chromium）：" + err.Error())
+			}
+			// 导航成功返回但还没命中，继续等媒体请求
+			navErr = nil
 		case <-poke.C:
 			tryPlay()
 		case <-deadline.C:
