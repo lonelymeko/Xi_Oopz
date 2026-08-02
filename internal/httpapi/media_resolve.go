@@ -25,6 +25,9 @@ var (
 // 命中即视为可播放媒体的直链特征（HLS 清单 / MP4 / 常见取流网关路径）。
 var mediaHitPattern = regexp.MustCompile(`(?i)\.m3u8(\?|$)|\.mp4(\?|$)|/playurl/m3u8|/playurl/[0-9a-f]{16,}\.m3u8`)
 
+// 按响应 MIME 识别媒体：视频流 / HLS / DASH，覆盖无扩展名直链（如抖音系 tos CDN）。
+var mediaMimePattern = regexp.MustCompile(`(?i)^(video/|application/(vnd\.apple\.mpegurl|x-mpegurl|dash\+xml))`)
+
 // 明显不是正片的媒体（广告/占位片头），命中则跳过继续等待。
 var mediaHitDenyPattern = regexp.MustCompile(`(?i)adposter|/ad/|/ads/|advertisement|preroll`)
 
@@ -141,24 +144,22 @@ func resolveMediaOnce(ctx context.Context, pageURL string) (string, string, erro
 
 	hit := make(chan [2]string, 1)
 	chromedp.ListenTarget(browserCtx, func(ev interface{}) {
-		var candidate string
+		var candidate, mime string
+		isMediaResource := false
 		switch e := ev.(type) {
 		case *network.EventRequestWillBeSent:
 			candidate = e.Request.URL
+			isMediaResource = e.Type == network.ResourceTypeMedia
 		case *network.EventResponseReceived:
 			candidate = e.Response.URL
+			mime = e.Response.MimeType
+			isMediaResource = e.Type == network.ResourceTypeMedia
 		default:
 			return
 		}
-		if candidate == "" || mediaHitDenyPattern.MatchString(candidate) {
+		kind, ok := classifyMediaCandidate(candidate, mime, isMediaResource)
+		if !ok {
 			return
-		}
-		if !mediaHitPattern.MatchString(candidate) {
-			return
-		}
-		kind := "mp4"
-		if strings.Contains(strings.ToLower(candidate), "m3u8") {
-			kind = "hls"
 		}
 		select {
 		case hit <- [2]string{candidate, kind}:
@@ -210,6 +211,26 @@ func resolveMediaOnce(ctx context.Context, pageURL string) (string, string, erro
 			return "", "", ctx.Err()
 		}
 	}
+}
+
+// classifyMediaCandidate 判断一条网络请求/响应是否为可播放媒体直链，并给出类型。
+// 三重识别覆盖不同站点：URL 后缀、响应 MIME、资源类型 Media（后者能命中
+// <video src> 的无扩展名直链，如抖音系 tos CDN）。返回 (kind, 是否命中)。
+func classifyMediaCandidate(candidate, mime string, isMediaResource bool) (string, bool) {
+	// blob:/data: 是 MSE 内部地址，拿不到真实源；空地址忽略
+	if candidate == "" || strings.HasPrefix(candidate, "blob:") || strings.HasPrefix(candidate, "data:") {
+		return "", false
+	}
+	if mediaHitDenyPattern.MatchString(candidate) {
+		return "", false
+	}
+	if !mediaHitPattern.MatchString(candidate) && !mediaMimePattern.MatchString(mime) && !isMediaResource {
+		return "", false
+	}
+	if strings.Contains(strings.ToLower(candidate), "m3u8") || strings.Contains(strings.ToLower(mime), "mpegurl") {
+		return "hls", true
+	}
+	return "mp4", true
 }
 
 type shortErr string
