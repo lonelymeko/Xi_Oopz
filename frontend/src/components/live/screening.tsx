@@ -204,7 +204,11 @@ export function ScreeningRoomPanel({
     if (state.playbackRate > 0 && Math.abs(player.playbackRate - state.playbackRate) > 0.01) {
       player.playbackRate = state.playbackRate;
     }
-    if (Math.abs(player.currentTime - targetTime) >= 3) {
+    // 控制者是进度的权威源，绝不能拿房间广播 seek 自己——否则有人加入/tick 广播携带
+    // 略旧的 currentTime（叠加客户端与服务器时钟差导致 elapsed 归零）时，会把控制者
+    // 反复拉回到广播时刻，表现为“播一会又回退”。只有观众才对齐远端进度。
+    // （与 Flutter 端 _syncViewerToState 的 !isController 守卫、VideoTogether 的 host 权威一致。）
+    if (!isController && Math.abs(player.currentTime - targetTime) >= 3) {
       try {
         player.currentTime = targetTime;
       } catch {
@@ -223,7 +227,7 @@ export function ScreeningRoomPanel({
     ) {
       void player.pause().catch(() => undefined);
     }
-  }, [isLiveScreening, state]);
+  }, [isController, isLiveScreening, state]);
 
   useEffect(() => {
     if (tickTimerRef.current) {
