@@ -10,6 +10,9 @@
   --teal: #6de2d2;
   --amber: #fbb45b;
   --rose: #fb7185;
+  /* 放映室播放器品牌色：B 站蓝 / B 站粉，供播放器皮肤与动作按钮共用 */
+  --bili-blue: #00aeec;
+  --bili-pink: #fb7299;
   --shadow: 0 24px 90px rgba(0, 0, 0, 0.34);
   --font: "Avenir Next", "PingFang SC", "Hiragino Sans GB", "Segoe UI", sans-serif;
 }
@@ -346,6 +349,48 @@ button {
   justify-content: center;
 }
 
+/* 图标 + 文字的动作按钮（放映室“替换当前并开始 / 加入播放列表”）。
+ * 之前的两个按钮是纯文字，没有任何图标，视觉上很单调。 */
+.action-pill--labeled {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 18px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.09);
+  transition:
+    background 140ms ease,
+    box-shadow 140ms ease,
+    transform 140ms ease;
+}
+
+.action-pill--labeled:hover:not(:disabled) {
+  background: rgba(0, 174, 236, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(0, 174, 236, 0.38);
+  transform: translateY(-1px);
+}
+
+.action-pill--labeled:last-child:hover:not(:disabled) {
+  background: rgba(251, 114, 153, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(251, 114, 153, 0.38);
+}
+
+.action-pill--labeled svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+  flex: none;
+}
+
+.action-pill--labeled:first-child svg {
+  color: var(--bili-blue);
+}
+
+.action-pill--labeled:last-child svg {
+  color: var(--bili-pink);
+}
+
 .round-action {
   width: 54px;
   height: 54px;
@@ -461,6 +506,12 @@ button {
   isolation: isolate;
 }
 
+/* 放映室播放器：哔哩哔哩风格皮肤（覆写 vidstack community skin）。
+ * 布局与控制条形态参考开源播放器 ArtPlayer / DPlayer / xgplayer / NPlayer：
+ * 底部渐变遮罩、圆角细进度条、「缓冲灰 + 已播蓝」双层、圆形按钮悬停底色。
+ * 品牌色取 B 站蓝 #00aeec，悬停强调取 B 站粉 #fb7299。
+ * 注意：community skin 真正读取的是 --video-* 变量，之前只改了 --media-brand，
+ * 所以进度条填充一直是默认白色、控制条也是默认灰底，观感很“素”。 */
 .screening-stage__player {
   position: absolute;
   inset: 0;
@@ -469,10 +520,86 @@ button {
   display: block;
   max-width: 100%;
   overflow: hidden;
-  --media-brand: var(--teal);
-  --media-focus: rgba(109, 226, 210, 0.5);
-  --media-border-radius: 18px;
+  /* --bili-blue / --bili-pink 定义在 :root，这里直接复用 */
+  /* community skin 的皮肤级变量 */
+  --video-brand: var(--bili-blue);
+  --video-bg: #000;
+  --video-border-radius: 12px;
+  --video-border: 1px solid rgba(255, 255, 255, 0.08);
+  --video-controls-color: #f7fbff;
+  --video-font-family: var(--font);
+  --video-scrim-bg: linear-gradient(to top, rgba(0, 0, 0, 0.84) 0%, rgba(0, 0, 0, 0.45) 30%, rgba(0, 0, 0, 0.12) 56%, rgba(0, 0, 0, 0) 72%);
+  /* vidstack 基础组件变量 */
+  --media-brand: var(--bili-blue);
+  --media-focus: rgba(0, 174, 236, 0.5);
+  --media-border-radius: 12px;
+  --media-controls-color: #f7fbff;
+  --media-font-family: var(--font);
+  --media-button-size: 36px;
+  --media-button-icon-size: 100%;
+  --media-button-border-radius: 999px;
+  --media-button-hover-bg: rgba(255, 255, 255, 0.18);
+  --media-button-touch-hover-border-radius: 999px;
+  --media-button-hover-transform: scale(1.06);
+  --media-button-hover-transition: transform 140ms ease;
+  --media-slider-track-width: 100%;
+  --media-slider-height: 26px;
+  --media-slider-track-height: 3px;
+  --media-slider-focused-track-height: 5px;
+  --media-slider-track-border-radius: 999px;
+  --media-slider-track-bg: rgba(255, 255, 255, 0.26);
+  --media-slider-track-progress-bg: rgba(255, 255, 255, 0.44);
+  --media-slider-track-fill-bg: var(--bili-blue);
+  --media-slider-thumb-size: 12px;
+  --media-slider-focused-thumb-size: 14px;
+  --media-slider-thumb-bg: #ffffff;
+  --media-slider-thumb-border: 0;
+  --media-slider-thumb-border-radius: 999px;
+  --media-slider-preview-bg: rgba(10, 14, 22, 0.94);
+  --media-slider-preview-border-radius: 10px;
+  --media-slider-value-bg: rgba(10, 14, 22, 0.94);
   background: #000;
+}
+
+/* 控制条：贴近 B 站的下边距与左右留白 */
+.screening-stage__player media-community-skin div[part="controls-group"]:nth-last-child(2) {
+  padding: 0 14px;
+  margin-bottom: -10px;
+}
+
+.screening-stage__player media-community-skin div[part="controls-group"]:first-child {
+  padding: 4px 14px 0;
+}
+
+/* 顶部标题：B 站式小字 + 投影，避免压在有亮度的画面上看不清 */
+.screening-stage__player media-community-skin [part="main-title"] {
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.66);
+}
+
+/* 时间：等宽数字，和进度条基线更贴合 */
+.screening-stage__player media-community-skin media-time {
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+}
+
+/* 进度条：悬停换成 B 站粉，松手回到品牌蓝 */
+.screening-stage__player media-community-skin media-time-slider:hover [part~="track-fill"] {
+  background-color: var(--bili-pink);
+}
+
+/* 缓冲条：比已播条更浅，形成 B 站那种灰/蓝两层 */
+.screening-stage__player media-community-skin media-time-slider [part~="track-progress"] {
+  background-color: var(--media-slider-track-progress-bg);
+}
+
+/* 按钮：圆形悬停底色，图标略缩小 */
+.screening-stage__player media-community-skin [data-media-button] {
+  color: #f7fbff;
 }
 
 .screening-stage__player media-outlet,
@@ -532,13 +659,24 @@ button {
 .screening-stage__image-button {
   min-width: 58px;
   height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 10px;
   border: 0;
   border-radius: 10px;
-  background: rgba(109, 226, 210, 0.18);
+  background: rgba(0, 174, 236, 0.18);
   color: #f3fffd;
   font-size: 0.8rem;
   font-weight: 700;
   cursor: pointer;
+}
+
+.screening-stage__image-button svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
 }
 
 .screening-stage__image-button:disabled {
@@ -573,7 +711,9 @@ button {
   color: var(--text);
   font-size: 0.74rem;
   opacity: 0;
-  transition: opacity 140ms ease, background 140ms ease;
+  transition:
+    opacity 140ms ease,
+    background 140ms ease;
 }
 
 .screening-stage__video-wrap:hover .screening-stage__download,
@@ -654,6 +794,27 @@ button {
   white-space: nowrap;
 }
 
+/* 放映室尚未进入（只是单击选中）时，用提示条替代输入区，避免未进房的人误发控制指令 */
+.screening-composer--locked {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 14px 18px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.screening-composer--locked svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  color: var(--bili-blue);
+}
+
 .screening-playlist-sidebar {
   display: flex;
   flex-direction: column;
@@ -661,6 +822,19 @@ button {
   max-height: 260px;
   overflow: auto;
   padding-right: 4px;
+}
+
+.screening-playlist__heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.screening-playlist__heading svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  color: var(--bili-pink);
 }
 
 .screening-playlist-mobile {

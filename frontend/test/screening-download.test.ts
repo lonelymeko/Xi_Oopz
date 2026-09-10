@@ -37,7 +37,7 @@ describe("assembleHLSDownload", () => {
     vi.unstubAllGlobals();
   });
 
-  it("应经代理抓取 TS 分片并按顺序拼接", async () => {
+  it("TS 分片应在前端拼装（不经后端拼流），并在转封装不可用时保留 .ts", async () => {
     const manifest = [
       "#EXTM3U",
       "#EXTINF:4,",
@@ -57,22 +57,32 @@ describe("assembleHLSDownload", () => {
     vi.stubGlobal("Blob", InspectableBlob);
 
     const progress: Array<[number, number]> = [];
-    const result = await assembleHLSDownload("https://cdn.example.com/vod/index.m3u8", new AbortController().signal, (done, total) =>
-      progress.push([done, total]),
+    const phases: string[] = [];
+    const result = await assembleHLSDownload(
+      "https://cdn.example.com/vod/index.m3u8",
+      new AbortController().signal,
+      (done, total) => progress.push([done, total]),
+      (phase) => phases.push(phase),
     );
 
-    expect(result.extension).toBe(".ts");
+    // 合成分片不是合法 TS，转封装必然失败 → 回退保存 .ts，绝不产出坏文件
+    expect(result.mode).toBe("blob");
+    if (result.mode !== "blob") throw new Error("expected blob mode");
+    expect(result.remuxed).toBe(false);
+    expect(result.filename.endsWith(".ts")).toBe(true);
     expect((result.blob as unknown as InspectableBlob).concatenated()).toEqual(new Uint8Array([1, 2, 3, 4]));
     expect(progress).toEqual([
       [1, 2],
       [2, 2],
     ]);
+    // TS 路径必须在取分片前通知 begin，并在拼装后进入 remuxing 阶段
+    expect(phases).toEqual(["begin", "remuxing"]);
     // 直连优先：清单与分片第一跳都直接打源站，不走后端代理
     expect(String(fetchMock.mock.calls[0][0])).toBe("https://cdn.example.com/vod/index.m3u8");
     expect(fetchMock.mock.calls.every((call) => !String(call[0]).includes("/api/media/proxy"))).toBe(true);
   });
 
-  it("应先取主清单第一个变体，fMP4 需带 init 段且扩展名为 mp4", async () => {
+  it("fMP4 分片应交给后端拼流 + 原生下载，前端不再拉分片", async () => {
     const master = ["#EXTM3U", "#EXT-X-STREAM-INF:BANDWIDTH=800000", "https://cdn.example.com/vod/variant.m3u8"].join("\n");
     const variant = [
       "#EXTM3U",
@@ -85,18 +95,25 @@ describe("assembleHLSDownload", () => {
       const url = String(input);
       if (url.endsWith("index.m3u8")) return textResponse(master, url);
       if (url.includes("variant.m3u8")) return textResponse(variant, url);
-      if (url.includes("init.mp4")) return binaryResponse([9]);
-      if (url.includes("chunk1.m4s")) return binaryResponse([8]);
-      throw new Error(`unexpected fetch ${url}`);
+      throw new Error(`fMP4 源不应在前端拉分片，却请求了 ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
-    vi.stubGlobal("Blob", InspectableBlob);
 
-    const result = await assembleHLSDownload("https://cdn.example.com/vod/index.m3u8", new AbortController().signal, () => {});
+    const result = await assembleHLSDownload(
+      "https://cdn.example.com/vod/index.m3u8",
+      new AbortController().signal,
+      () => {},
+      () => {},
+      "我的影片",
+    );
 
-    expect(result.extension).toBe(".mp4");
-    // init 段必须排在最前
-    expect((result.blob as unknown as InspectableBlob).concatenated()).toEqual(new Uint8Array([9, 8]));
+    expect(result.mode).toBe("native");
+    if (result.mode !== "native") throw new Error("expected native mode");
+    expect(result.filename).toBe("我的影片.mp4");
+    expect(result.url).toContain("/api/media/download.m3u8?");
+    expect(result.url).toContain(encodeURIComponent("https://cdn.example.com/vod/index.m3u8"));
+    // 只探测清单（主清单 + 变体），一个分片都没拉
+    expect(fetchMock.mock.calls.length).toBe(2);
   });
 
   it("无 EXT-X-ENDLIST 的直播流应拒绝下载", async () => {

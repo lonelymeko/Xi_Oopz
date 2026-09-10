@@ -29,7 +29,7 @@ import type {
   ScreeningSnapshot,
   User,
 } from "../types";
-import type { AudioInputOption, ScreenSharePreset, Session } from "../types/live";
+import type { AudioInputOption, DownloadNoticeEvent, ScreenSharePreset, Session } from "../types/live";
 
 const EMOJI_GROUPS: Array<{ label: string; items: string[] }> = [
   { label: "常用", items: ["😀", "😂", "🤣", "😊", "😍", "🥰", "😭", "😅", "🤔", "😎"] },
@@ -105,9 +105,22 @@ export function LivePage() {
   const voiceJoinInFlightRef = useRef<number | null>(null);
   const voiceLeaveInFlightRef = useRef(false);
   const screeningJoinDedupRef = useRef<{ channelId: number | null; until: number }>({ channelId: null, until: 0 });
+  // 当前正在展示的下载进度通知 id（进度统一走通知栏，见 handleDownloadNotice）
+  const downloadNoticeIdRef = useRef<number | null>(null);
 
   const audioSetupPending = audioDevicesLoading || audioPrewarming;
-  const { notices, pushNotice, dismissNotice, resolveErrorMessage, showError, showInfo, clearAllNoticeTimers } = useNoticeDomain();
+  const {
+    notices,
+    pushNotice,
+    pushProgressNotice,
+    updateNoticeProgress,
+    settleNotice,
+    dismissNotice,
+    resolveErrorMessage,
+    showError,
+    showInfo,
+    clearAllNoticeTimers,
+  } = useNoticeDomain();
   const { voiceLog, screeningLog } = useLiveLogger();
   const {
     authMode,
@@ -216,6 +229,77 @@ export function LivePage() {
   useEffect(() => {
     activeScreeningChannelIdRef.current = activeScreeningChannel?.id || null;
   }, [activeScreeningChannel?.id]);
+
+  // 进入放映室的判据：已经连麦加入该放映频道。单击只选中不等于进入。
+  const screeningJoined = Boolean(activeScreeningChannel && currentVoiceChannelId === activeScreeningChannel.id);
+
+  /**
+   * 放映室下载进度统一走通知栏：
+   * HLS 用一个常驻通知原地更新百分比，结束时转成成功/失败/已取消；
+   * 直链是浏览器原生下载，前端观测不到进度，只提示已交给浏览器。
+   */
+  const handleDownloadNotice = useCallback(
+    (event: DownloadNoticeEvent) => {
+      const activeId = downloadNoticeIdRef.current;
+      switch (event.phase) {
+        case "begin": {
+          if (activeId != null) {
+            settleNotice(activeId, "info", "已取消上一次下载", "新的下载已开始", { dismiss: true });
+          }
+          downloadNoticeIdRef.current = pushProgressNotice(event.title || "视频", "正在下载 0%", 0);
+          break;
+        }
+        case "progress": {
+          if (activeId != null) {
+            updateNoticeProgress(activeId, event.progress, `正在下载 ${event.progress}%`);
+          }
+          break;
+        }
+        case "remuxing": {
+          // 转封装没有细粒度进度，把文案换成阶段说明，否则会一直停在 100% 像卡死
+          if (activeId != null) {
+            updateNoticeProgress(activeId, 100, "分片下载完成，正在转封装为 MP4…");
+          }
+          break;
+        }
+        case "done": {
+          if (activeId != null) {
+            settleNotice(activeId, "info", "下载完成", `${event.title || "视频"} ${event.message || "已保存到本地"}`);
+            downloadNoticeIdRef.current = null;
+          }
+          break;
+        }
+        case "cancelled": {
+          if (activeId != null) {
+            settleNotice(activeId, "info", "已取消下载", "下载已取消", { dismiss: true });
+            downloadNoticeIdRef.current = null;
+          }
+          break;
+        }
+        case "handedOff": {
+          // 原生下载没有前端进度：把可能还挂着的进度通知收掉，只留一条提示
+          if (activeId != null) {
+            dismissNotice(activeId);
+            downloadNoticeIdRef.current = null;
+          }
+          pushNotice("info", "已开始下载", `${event.title || "视频"} 已交给浏览器下载，进度见浏览器下载栏`);
+          break;
+        }
+        case "failed": {
+          if (activeId != null) {
+            settleNotice(activeId, "error", event.title, event.message);
+            downloadNoticeIdRef.current = null;
+          } else {
+            pushNotice("error", event.title, event.message);
+          }
+          break;
+        }
+        default:
+          break;
+      }
+    },
+    [pushNotice, pushProgressNotice, settleNotice, updateNoticeProgress],
+  );
 
   const {
     joinVoice,
@@ -525,6 +609,7 @@ export function LivePage() {
         localScreenStream={localScreenStream}
         peerDiagnostics={peerDiagnostics}
         screeningJoinEpoch={screeningJoinEpoch}
+        screeningJoined={screeningJoined}
         screeningSnapshot={screeningSnapshot}
         screeningUrlInput={screeningUrlInput}
         screeningTitleInput={screeningTitleInput}
@@ -575,6 +660,7 @@ export function LivePage() {
           socketRef.current?.send(type, { channelId: activeScreeningChannel.id, ...payload });
         }}
         onScreeningError={(title, message) => pushNotice("error", title, message)}
+        onDownloadNotice={handleDownloadNotice}
       />
       <LiveOverlays
         session={session}

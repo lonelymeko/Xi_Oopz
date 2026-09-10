@@ -23,6 +23,7 @@ import {
   VoiceChannelIcon,
 } from "./icons";
 import { escapeHTML, formatTime, initials } from "../../utils/live";
+import type { DownloadNoticeEvent } from "../../types/live";
 import type {
   BootstrapResponse,
   Channel,
@@ -57,6 +58,7 @@ export function LiveMainPanel(props: {
   localScreenStream: MediaStream | null;
   peerDiagnostics: Map<number, PeerConnectionDiagnostics>;
   screeningJoinEpoch: number;
+  screeningJoined: boolean;
   screeningSnapshot: ScreeningSnapshot | null;
   screeningUrlInput: string;
   screeningTitleInput: string;
@@ -90,6 +92,7 @@ export function LiveMainPanel(props: {
   onScreeningRemove: (itemId: string) => void;
   onScreeningPlaybackEvent: (type: string, payload: Record<string, unknown>) => void;
   onScreeningError: (title: string, message: string) => void;
+  onDownloadNotice: (event: DownloadNoticeEvent) => void;
 }) {
   const {
     bootstrap,
@@ -109,6 +112,7 @@ export function LiveMainPanel(props: {
     localScreenStream,
     peerDiagnostics,
     screeningJoinEpoch,
+    screeningJoined,
     screeningSnapshot,
     screeningUrlInput,
     screeningTitleInput,
@@ -142,6 +146,7 @@ export function LiveMainPanel(props: {
     onScreeningRemove,
     onScreeningPlaybackEvent,
     onScreeningError,
+    onDownloadNotice,
   } = props;
 
   const onlineMemberIds = new Set(onlineUsers.keys());
@@ -248,6 +253,7 @@ export function LiveMainPanel(props: {
             snapshot={screeningSnapshot}
             currentUser={user}
             joinEpoch={screeningJoinEpoch}
+            joined={screeningJoined}
             urlInput={screeningUrlInput}
             titleInput={screeningTitleInput}
             onUrlInputChange={setScreeningUrlInput}
@@ -256,6 +262,7 @@ export function LiveMainPanel(props: {
             onAppend={({ url, title }) => onScreeningAppend(url, title)}
             onPlaybackEvent={onScreeningPlaybackEvent}
             onError={onScreeningError}
+            onDownloadNotice={onDownloadNotice}
           />
         ) : null}
 
@@ -401,7 +408,9 @@ export function LiveMainPanel(props: {
         </div>
 
         <div className="member-list">
-          {activeScreeningChannel ? <ScreeningPlaylistSection playlist={screeningSnapshot?.playlist || []} onRemove={onScreeningRemove} /> : null}
+          {activeScreeningChannel ? (
+            <ScreeningPlaylistSection playlist={screeningSnapshot?.playlist || []} onRemove={onScreeningRemove} />
+          ) : null}
           {activeScreeningChannel ? (
             <MemberSection
               title={`${screeningViewerMembers.length} 人正在观看 ${activeScreeningChannel.name}`}

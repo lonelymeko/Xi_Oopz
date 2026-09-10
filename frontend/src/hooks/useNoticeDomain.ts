@@ -40,6 +40,49 @@ export function useNoticeDomain() {
   }, []);
 
   /**
+   * 推一条常驻的进度通知（不自动消失），返回 id 供后续更新。
+   * 用于下载这类需要持续展示进度的长任务。
+   */
+  const pushProgressNotice = useCallback((title: string, message: string, progress = 0) => {
+    const id = noticeIdRef.current + 1;
+    noticeIdRef.current = id;
+    setNotices((current) => [...current, { id, kind: "info", title, message, progress }]);
+    return id;
+  }, []);
+
+  /**
+   * 原地更新进度通知的进度与文案（通知不重建，避免闪烁）。
+   */
+  const updateNoticeProgress = useCallback((id: number, progress: number, message?: string) => {
+    setNotices((current) => current.map((item) => (item.id === id ? { ...item, progress, message: message ?? item.message } : item)));
+  }, []);
+
+  /**
+   * 结束一条进度通知：清掉进度条、转成终态文案并恢复自动消失；
+   * `dismiss` 为 true 时直接关闭（例如用户取消下载）。
+   */
+  const settleNotice = useCallback((id: number, kind: Notice["kind"], title: string, message: string, options?: { dismiss?: boolean }) => {
+    const existing = noticeTimersRef.current.get(id);
+    if (existing) {
+      window.clearTimeout(existing);
+      noticeTimersRef.current.delete(id);
+    }
+    if (options?.dismiss) {
+      setNotices((current) => current.filter((item) => item.id !== id));
+      return;
+    }
+    setNotices((current) => current.map((item) => (item.id === id ? { ...item, kind, title, message, progress: null } : item)));
+    const timer = window.setTimeout(
+      () => {
+        setNotices((current) => current.filter((item) => item.id !== id));
+        noticeTimersRef.current.delete(id);
+      },
+      kind === "error" ? 6400 : 4200,
+    );
+    noticeTimersRef.current.set(id, timer);
+  }, []);
+
+  /**
    * 解析错误消息并回退到默认文案。
    */
   const resolveErrorMessage = useCallback((error: unknown, fallback: string) => {
@@ -84,6 +127,9 @@ export function useNoticeDomain() {
   return {
     notices,
     pushNotice,
+    pushProgressNotice,
+    updateNoticeProgress,
+    settleNotice,
     dismissNotice,
     resolveErrorMessage,
     showError,
