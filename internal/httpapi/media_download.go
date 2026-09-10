@@ -308,15 +308,15 @@ func sanitizeDownloadFilename(raw string) string {
 // contentDispositionAttachment 同时给出 ASCII 兜底名与 RFC 5987 的 UTF-8 名，
 // 这样中文标题下载后不会变成乱码或 download。
 func contentDispositionAttachment(filename string) string {
-	ascii := sanitizeDownloadFilename(filename)
-	if ascii == "" {
-		ascii = "media"
+	safe := sanitizeDownloadFilename(filename)
+	if safe == "" {
+		safe = "media"
 	}
-	ascii = strings.Map(func(r rune) rune {
+	ascii := strings.Map(func(r rune) rune {
 		if r > 0x7f {
 			return '_'
 		}
 		return r
-	}, ascii)
-	return fmt.Sprintf("attachment; filename=%q; filename*=UTF-8''%s", ascii, url.PathEscape(filename))
+	}, safe)
+	return fmt.Sprintf("attachment; filename=%q; filename*=UTF-8''%s", ascii, url.PathEscape(safe))
 }
