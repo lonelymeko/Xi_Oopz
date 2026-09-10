@@ -23,6 +23,7 @@ const (
 	mediaProxyTimeout       = 30 * time.Second
 	mediaProxyManifestLimit = 8 << 20
 	mediaProxyMaxRedirects  = 5
+	mediaProxyUserAgent     = "Mozilla/5.0 (compatible; OOPZ-MediaProxy/1.0)"
 )
 
 var hlsURIAttributePattern = regexp.MustCompile(`URI="([^"]+)"`)
@@ -48,16 +49,7 @@ func (h *Handler) ProxyMedia(c *gin.Context) {
 	}
 	copyMediaProxyRequestHeaders(c.Request, upstreamReq, target)
 
-	client := &http.Client{
-		Timeout: mediaProxyTimeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= mediaProxyMaxRedirects {
-				return http.ErrUseLastResponse
-			}
-			_, err := validateParsedMediaProxyTarget(req.Context(), req.URL)
-			return err
-		},
-	}
+	client := mediaProxyHTTPClient()
 	resp, err := client.Do(upstreamReq)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "media upstream request failed"})
@@ -124,9 +116,29 @@ func setMediaProxyCORS(c *gin.Context) {
 	c.Header("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges")
 }
 
-func copyMediaProxyRequestHeaders(source *http.Request, target *http.Request, targetURL *url.URL) {
-	target.Header.Set("User-Agent", "Mozilla/5.0 (compatible; OOPZ-MediaProxy/1.0)")
+// mediaProxyHTTPClient 创建访问源站的 HTTP 客户端：带超时，且每一次重定向都要重新做
+// SSRF 校验（避免用 30x 绕过内网地址拦截）。
+func mediaProxyHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: mediaProxyTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= mediaProxyMaxRedirects {
+				return http.ErrUseLastResponse
+			}
+			_, err := validateParsedMediaProxyTarget(req.Context(), req.URL)
+			return err
+		},
+	}
+}
+
+// setUpstreamMediaHeaders 设置访问源站时统一的 UA 与 Referer。
+func setUpstreamMediaHeaders(target *http.Request, targetURL *url.URL) {
+	target.Header.Set("User-Agent", mediaProxyUserAgent)
 	target.Header.Set("Referer", (&url.URL{Scheme: targetURL.Scheme, Host: targetURL.Host, Path: "/"}).String())
+}
+
+func copyMediaProxyRequestHeaders(source *http.Request, target *http.Request, targetURL *url.URL) {
+	setUpstreamMediaHeaders(target, targetURL)
 	if accept := source.Header.Get("Accept"); accept != "" {
 		target.Header.Set("Accept", accept)
 	}

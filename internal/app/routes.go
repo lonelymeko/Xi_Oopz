@@ -38,6 +38,9 @@ func RegisterRoutes(router *gin.Engine, application *App, hub *realtime.Hub) {
 	router.POST("/api/domains/:domainId/channels", handler.CreateChannel)
 	router.GET("/api/domains/:domainId/channels/:channelId/messages", handler.ChannelMessages)
 	router.PATCH("/api/channels/:channelId", handler.UpdateChannel)
+	// 把 HLS 清单拼成单个文件流，交给浏览器原生下载（fMP4 源走这条）
+	router.GET("/api/media/download.m3u8", handler.DownloadHLS)
+	router.OPTIONS("/api/media/download.m3u8", handler.DownloadHLS)
 	router.GET("/api/media/proxy.m3u8", handler.ProxyMedia)
 	router.OPTIONS("/api/media/proxy.m3u8", handler.ProxyMedia)
 	router.GET("/api/media/proxy", handler.ProxyMedia)

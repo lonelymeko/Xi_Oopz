@@ -288,13 +288,7 @@ export function PlusIcon() {
 export function AudioShareIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        d="M4 10v4M8 7v10M12 4.5v15M16 8v8M20 10.5v3"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-      />
+      <path d="M4 10v4M8 7v10M12 4.5v15M16 8v8M20 10.5v3" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
     </svg>
   );
 }
@@ -336,6 +330,35 @@ export function TrashIcon() {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
+    </svg>
+  );
+}
+
+/** 加入播放列表：列表 + 加号。 */
+export function PlaylistAddIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 6.5h11M4 11.5h11M4 16.5h6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M17.5 13v7M14 16.5h7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/** 播放列表：列表 + 播放三角。 */
+export function PlaylistIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 6.5h9M4 11.5h9M4 16.5h5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M16 10.5v7l6-3.5-6-3.5Z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+/** 暂停（图片序列控制条用）。 */
+export function PauseIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M9 5.5v13M15 5.5v13" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
     </svg>
   );
 }

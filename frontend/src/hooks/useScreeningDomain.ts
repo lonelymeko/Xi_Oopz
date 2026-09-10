@@ -77,7 +77,11 @@ export function useScreeningDomain(options: UseScreeningDomainOptions) {
       return;
     }
 
-    socketRef.current?.send("screening.leave", { channelId: leavingChannel.id });
+    // 单击只是选中放映室，并不代表已经进入：只有连麦加入（currentVoiceChannelId 等于该
+    // 放映室 id）时才需要发 screening.leave，避免“选中一下又切走”时误清房间。
+    if (currentVoiceChannelIdRef.current === leavingChannel.id) {
+      socketRef.current?.send("screening.leave", { channelId: leavingChannel.id });
+    }
     screeningJoinDedupRef.current = { channelId: null, until: 0 };
     setScreeningSnapshot(null);
     setScreeningJoinEpoch((value) => value + 1);

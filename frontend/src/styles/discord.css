@@ -1353,6 +1353,24 @@ body {
   height: 14px;
 }
 
+/* 进度条：下载等长任务的进度统一在通知栏展示 */
+.notice-card__progress {
+  position: relative;
+  height: 6px;
+  margin-top: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.notice-card__progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--bili-blue), var(--teal));
+  transition: width 200ms ease;
+}
+
 .empty-state {
   padding: 22px;
   border-radius: 18px;

@@ -105,7 +105,13 @@ export function useLiveRuntime(options: UseLiveRuntimeOptions) {
           if (currentVoiceChannelIdRef.current && voiceJoinInFlightRef.current !== currentVoiceChannelIdRef.current) {
             socketRef.current?.send("channel.join", { channelId: currentVoiceChannelIdRef.current });
           }
-          if (activeChannelIdRef.current && activeChannelRef.current?.type === "screening") {
+          // 只有真正进入放映室（已连麦加入该频道）时才在重连后自动补齐 screening.join；
+          // 单击选中放映室不等于进入，不能因为重连把人拉进房间。
+          if (
+            activeChannelIdRef.current &&
+            activeChannelRef.current?.type === "screening" &&
+            currentVoiceChannelIdRef.current === activeChannelIdRef.current
+          ) {
             screeningLog("screening:join:send", { channelId: activeChannelIdRef.current, reason: "socket-ready" });
             socketRef.current?.send("screening.join", { channelId: activeChannelIdRef.current });
           }
