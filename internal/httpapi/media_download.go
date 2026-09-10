@@ -283,8 +283,8 @@ func resolveDownloadFilename(rawQuery string, manifestBase *url.URL, plan hlsDow
 		}
 		return name
 	}
-	base := strings.TrimSuffix(path.Base(manifestBase.Path), path.Ext(manifestBase.Path))
-	if base == "" || base == "." || base == "/" {
+	base := sanitizeDownloadFilename(strings.TrimSuffix(path.Base(manifestBase.Path), path.Ext(manifestBase.Path)))
+	if base == "" || base == "." {
 		base = "media"
 	}
 	return base + extension
