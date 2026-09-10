@@ -654,6 +654,10 @@ func (h *Hub) leaveChannel(client *Client, persist bool) {
 		h.mu.Unlock()
 		return
 	}
+	// 放映室同时也是语音频道（同一个 channel id）：挂断该频道的语音就等于离开放映室。
+	// 记录放映频道 id，语音清理完成后要一并清掉放映室 viewer，否则“从放映室直接退出/挂断”
+	// 之后 Redis 的 screening:room:<id>:viewers 仍残留该用户，别人看到的成员列表里他还在放映室。
+	screeningChannelID := client.currentScreeningChannelID
 
 	delete(h.channelClients[channelID], client)
 	if len(h.channelClients[channelID]) == 0 {
@@ -680,6 +684,10 @@ func (h *Hub) leaveChannel(client *Client, persist bool) {
 	}, nil)
 	if persist {
 		h.broadcastTransientSystem(client, channelID, fmt.Sprintf("%s left the room", client.user.DisplayName))
+	}
+	if screeningChannelID != 0 && screeningChannelID == channelID {
+		log.Printf("[screening-backend] leave voice implies screening leave user=%d channel=%d", client.user.ID, channelID)
+		h.leaveScreening(client, screeningChannelID)
 	}
 }
 
