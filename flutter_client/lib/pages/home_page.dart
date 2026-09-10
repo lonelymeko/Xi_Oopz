@@ -48,6 +48,7 @@ class _HomePageState extends State<HomePage> {
   final Map<int, RTCVideoRenderer> _screenRenderers = {};
   bool _micEnabled = true;
   bool _speakerOn = false; // false = 蓝牙/有线耳机优先，true = 强制扬声器
+  bool _screenSharing = false; // 本端是否正在共享屏幕（发送端状态）
   bool _wsConnected = false;
   String? _error;
 
@@ -102,6 +103,11 @@ class _HomePageState extends State<HomePage> {
           if (mounted) setState(() => _diagnostics = diagnostics);
         },
         onLocalAudioChanged: (_) {},
+        onScreenSharingChanged: (sharing) {
+          if (!mounted) return;
+          setState(() => _screenSharing = sharing);
+          unawaited(_updateKeepAliveNotification());
+        },
         onNotice: (kind, title, message) => _notify('$title：$message'),
       );
 
@@ -514,6 +520,7 @@ class _HomePageState extends State<HomePage> {
       _pendingJoinChannelId = null;
       _voiceMembers.clear();
       _diagnostics = {};
+      _screenSharing = false;
     });
   }
 
@@ -566,9 +573,14 @@ class _HomePageState extends State<HomePage> {
     final channelKind = inScreening ? '视频频道' : '语音频道';
     final channelName = channel?.name ?? '频道';
     final count = _roomMemberCount(channelId);
+    // 共享屏幕时优先提示共享状态：前台服务本身也会因 mediaProjection 类型成为
+    // Android 判定“正在投屏”的依据，通知文案要和实际状态一致。
+    final text = _screenSharing
+        ? '正在共享屏幕 · 在$channelKind中 · 房间 $count 人'
+        : '正在连麦中 · 在$channelKind中 · 房间 $count 人';
     await BackgroundKeepAlive.start(
       title: 'Oopz · $channelName',
-      text: '正在连麦中 · 在$channelKind中 · 房间 $count 人',
+      text: text,
     );
   }
 
@@ -806,6 +818,7 @@ class _HomePageState extends State<HomePage> {
   Widget _voiceBar() => VoiceControls(
         micEnabled: _micEnabled,
         speakerOn: _speakerOn,
+        screenSharing: _screenSharing,
         onToggleMic: () async {
           final next = !_micEnabled;
           await _rtc?.toggleMic(next);
@@ -816,8 +829,35 @@ class _HomePageState extends State<HomePage> {
           await _rtc?.setSpeakerphone(next);
           setState(() => _speakerOn = next);
         },
+        onToggleScreenShare: _toggleScreenShare,
         onLeave: _leaveCurrentSession,
       );
+
+  /// 切换屏幕共享。授权框被取消时 startScreenShare 返回 false，属正常路径不弹错误。
+  Future<void> _toggleScreenShare() async {
+    final rtc = _rtc;
+    if (rtc == null) return;
+    if (_currentVoiceChannelId == null) {
+      _notify('请先进入语音频道再共享屏幕');
+      return;
+    }
+    // 与 Web 端一致：放映室连麦是同步观影用的，不支持叠加屏幕共享
+    if (_activeScreeningChannelId != null &&
+        _activeScreeningChannelId == _currentVoiceChannelId) {
+      _notify('放映室连麦暂不支持屏幕共享');
+      return;
+    }
+    if (rtc.screenSharing) {
+      await rtc.stopScreenShare();
+      await _updateKeepAliveNotification();
+      return;
+    }
+    final started = await rtc.startScreenShare();
+    if (started) {
+      _notify('已开始共享屏幕');
+    }
+    await _updateKeepAliveNotification();
+  }
 }
 
 class _Welcome extends StatelessWidget {

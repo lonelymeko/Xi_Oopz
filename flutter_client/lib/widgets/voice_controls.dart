@@ -3,16 +3,20 @@ import 'package:flutter/material.dart';
 class VoiceControls extends StatelessWidget {
   final bool micEnabled;
   final bool speakerOn;
+  final bool screenSharing;
   final VoidCallback onToggleMic;
   final VoidCallback onToggleSpeaker;
+  final VoidCallback onToggleScreenShare;
   final VoidCallback onLeave;
 
   const VoiceControls({
     super.key,
     required this.micEnabled,
     required this.speakerOn,
+    required this.screenSharing,
     required this.onToggleMic,
     required this.onToggleSpeaker,
+    required this.onToggleScreenShare,
     required this.onLeave,
   });
 
@@ -45,6 +49,13 @@ class VoiceControls extends StatelessWidget {
               color: Colors.white,
               bg: const Color(0xFF2A2A2A),
               onTap: onToggleSpeaker,
+            ),
+            _CtrlBtn(
+              icon: screenSharing ? Icons.stop_screen_share : Icons.screen_share,
+              label: screenSharing ? '停止共享' : '共享屏幕',
+              color: screenSharing ? const Color(0xFF0B1018) : Colors.white,
+              bg: screenSharing ? const Color(0xFF6DE2D2) : const Color(0xFF2A2A2A),
+              onTap: onToggleScreenShare,
             ),
             _CtrlBtn(
               icon: Icons.call_end,

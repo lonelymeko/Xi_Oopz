@@ -4,6 +4,7 @@ import 'dart:io' show Platform;
 
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
+import 'background_service.dart';
 import 'socket_client.dart';
 import 'types.dart';
 
@@ -64,10 +65,12 @@ class PeerWrapper {
 /// - media.sync_request 补流循环、重连后 outbound rehydrate(replaceTrack null→track)
 ///
 /// 与 Web 端的移动端差异：
-/// - 无 Web Audio 混音：麦克风轨直接挂 audioTransceiver；将来手机发屏幕音频时
-///   挂 displayAudioTransceiver（Web 端接收侧本就按第二条 audio transceiver 区分）
-/// - v1 不实现手机端屏幕共享“发送”（需 MediaProjection / Broadcast Extension），
-///   但完整实现“接收”远端屏幕共享
+/// - 无 Web Audio 混音：麦克风轨直接挂 audioTransceiver；屏幕音频需 Android
+///   AudioPlaybackCapture，flutter_webrtc 未实现，故手机端只共享画面不共享系统声音
+///   （Web 端接收侧本就按第二条 audio transceiver 区分，协议不需要改）
+/// - 屏幕共享发送：Android 走 MediaProjection（flutter_webrtc 的 getDisplayMedia），
+///   复用已协商好的 screenTransceiver，共享时 replaceTrack + SendRecv 并重协商；
+///   Android 14+ 依赖 manifest 里 foregroundServiceType 含 mediaProjection 的前台服务
 class RTCController {
   static const int mediaReconnectDelayMs = 1500;
   static const int mediaReconnectMaxAttempts = 5;
@@ -87,6 +90,18 @@ class RTCController {
   static const int maxPeerRebuilds = 3;
   static const int outageNoticeIntervalMs = 30000;
 
+  /// 屏幕共享发送上限。Android 端 flutter_webrtc 的 getDisplayMedia 会忽略传入的
+  /// 宽高与帧率，直接按屏幕真实分辨率以 DEFAULT_FPS 采集（见 GetUserMediaImpl
+  /// getDisplayMedia：info.width/height 取自 display.getRealSize），所以分辨率与帧率
+  /// 只能在发送端用 RTCRtpSender 参数压。手机屏幕常见 1080x2400，若不设上限会发热、
+  /// 掉帧，Mesh 下还会按 N-1 份重复上传把上行打满。
+  static const int screenShareMaxBitrateBps = 1500000;
+  static const int screenShareMaxFramerate = 15;
+
+  /// Android 14+ 是否强制整屏采集（关掉系统授权框里的「单个应用」选项）。
+  /// 整屏更贴合“共享手机屏幕”的直觉；若要支持只共享某一个 App，改成 false 即可。
+  static const bool screenShareFullScreenOnly = true;
+
   final SocketClient socket;
   final int? Function() getCurrentVoiceChannelId;
   final OopzUser? Function() getCurrentUser;
@@ -96,12 +111,15 @@ class RTCController {
   final void Function(Map<int, PeerDiagnostics> diagnostics)
       onDiagnosticsChanged;
   final void Function(MediaStream? stream) onLocalAudioChanged;
+  final void Function(bool sharing) onScreenSharingChanged;
   final void Function(String kind, String title, String message) onNotice;
 
   final Stopwatch _clock = Stopwatch()..start();
 
   MediaStream? _localAudioStream;
+  MediaStream? _localScreenStream;
   bool _micEnabled = true;
+  bool _screenSharing = false;
   bool _voiceSessionActive = false;
 
   final Map<int, PeerWrapper> _peers = {};
@@ -125,12 +143,16 @@ class RTCController {
     required this.onMediaChanged,
     required this.onDiagnosticsChanged,
     required this.onLocalAudioChanged,
+    required this.onScreenSharingChanged,
     required this.onNotice,
   });
 
   int get _nowMs => _clock.elapsedMilliseconds;
 
   bool get micEnabled => _micEnabled;
+
+  /// 当前是否正在向频道共享屏幕（发送端状态）。
+  bool get screenSharing => _screenSharing;
 
   // ------------------------------------------------------------------
   // 生命周期
@@ -150,6 +172,12 @@ class RTCController {
 
   Future<void> leaveVoice() async {
     _voiceSessionActive = false;
+    // 共享中直接离开频道时，先把屏幕共享收干净：停采集 + 摘轨 + 广播 screen.state:false。
+    // 此时 getCurrentVoiceChannelId() 仍是当前频道，广播能带对 channelId；马上要关掉所有
+    // peer，所以跳过重协商。
+    if (_screenSharing) {
+      await stopScreenShare(renegotiate: false);
+    }
     final channelId = getCurrentVoiceChannelId();
     if (channelId != null) {
       socket.send('channel.leave', {'channelId': channelId});
@@ -174,6 +202,161 @@ class RTCController {
       socket
           .send('voice.state', {'channelId': channelId, 'micEnabled': enabled});
     }
+  }
+
+  // ------------------------------------------------------------------
+  // 屏幕共享（发送端）
+  // ------------------------------------------------------------------
+
+  /// 发起屏幕共享，与 Web 端 rtc.ts 的 startScreenShare 对齐：
+  /// 采集 → 挂到已协商好的 screenTransceiver 并切成 SendRecv → 广播 screen.state。
+  /// 协议与 Web 端一致，Web/其它端无需改动即可观看。
+  ///
+  /// 返回 false 表示用户取消授权或采集失败（取消属于正常路径，调用方不必报错弹窗）。
+  Future<bool> startScreenShare() async {
+    if (_screenSharing) return true;
+    if (!_voiceSessionActive) {
+      onNotice('error', '无法共享屏幕', '请先进入语音频道');
+      return false;
+    }
+    try {
+      // Android 14(API 34)+ 必须先把 foregroundServiceType 含 mediaProjection 的前台
+      // 服务拉起来再取投影，否则 getMediaProjection 会抛 SecurityException 直接崩。
+      // 进语音频道时通常已在运行，这里兜底并改通知文案。
+      await BackgroundKeepAlive.ensureForScreenShare();
+
+      // Android/macOS 先显式请求采集授权：
+      // - Android 14+ 传 fullScreenOnly 可强制整屏，避免用户只选到“单个应用”
+      //   导致观众只看到一小块画面；
+      // - 拿到授权后 getDisplayMedia 会复用这次返回的投影令牌，不会再弹第二次框。
+      // 用户取消时直接返回 false，属于正常路径，不该弹错误。
+      if (Platform.isAndroid || Platform.isMacOS) {
+        final granted = await Helper.requestCapturePermission(
+            fullScreenOnly: screenShareFullScreenOnly);
+        if (!granted) {
+          _rlog('startScreenShare 用户取消采集授权');
+          return false;
+        }
+      }
+
+      final stream = await navigator.mediaDevices.getDisplayMedia({
+        'video': true,
+        // 手机端系统音频要走 AudioPlaybackCapture，flutter_webrtc 未实现，显式关闭。
+        'audio': false,
+      });
+      final track = stream.getVideoTracks().firstOrNull;
+      if (track == null) {
+        await _stopTrackGroup(stream);
+        onNotice('error', '屏幕共享失败', '没有取到屏幕视频轨道');
+        return false;
+      }
+
+      _localScreenStream = stream;
+      _screenSharing = true;
+      // 用户在系统 UI 点“停止共享”、锁屏或切到禁止投屏的界面时 SDK 会结束轨道；
+      // 必须回收到房间状态，否则房间一直显示“共享中”但实际没有画面。
+      track.onEnded = () {
+        unawaited(stopScreenShare());
+      };
+
+      await _renegotiateForScreenShare();
+      _broadcastScreenState(true);
+      onScreenSharingChanged(true);
+      _rlog('startScreenShare 成功 轨道=${track.id}');
+      return true;
+    } catch (e) {
+      _rlog('startScreenShare 失败: $e');
+      _screenSharing = false;
+      await _teardownLocalScreenStream();
+      // 采集/挂轨中途失败时，把可能已经挂上的（已停止的）轨道摘干净
+      for (final wrapper in _peers.values) {
+        await _applyScreenTrackToPeer(wrapper, null);
+      }
+      onScreenSharingChanged(false);
+      onNotice('error', '屏幕共享失败', '$e');
+      return false;
+    }
+  }
+
+  /// 停止屏幕共享并回收房间状态。
+  /// [notifyServer] 为 false 时只做本地回收；[renegotiate] 为 false 时跳过重协商
+  /// （整体离开频道时用，反正马上要关掉所有 peer）。
+  Future<void> stopScreenShare(
+      {bool notifyServer = true, bool renegotiate = true}) async {
+    final wasSharing = _screenSharing;
+    _screenSharing = false;
+    // 先摘 onEnded，避免 track.stop() 触发的结束回调再进一轮回收。
+    final track = _localScreenStream?.getVideoTracks().firstOrNull;
+    track?.onEnded = null;
+    await _teardownLocalScreenStream();
+    if (wasSharing) {
+      if (renegotiate) {
+        await _renegotiateForScreenShare();
+      }
+      if (notifyServer) {
+        _broadcastScreenState(false);
+      }
+      onScreenSharingChanged(false);
+      _rlog('stopScreenShare 完成');
+    }
+  }
+
+  Future<void> _teardownLocalScreenStream() async {
+    final stream = _localScreenStream;
+    _localScreenStream = null;
+    await _stopTrackGroup(stream);
+  }
+
+  /// 屏幕共享开关后：先把屏幕轨挂到每条 peer 上，再补一轮 offer 触发重协商。
+  /// 只挂轨不发 offer 的话，观众那边的 SDP 仍是 recvonly，看不到画面。
+  Future<void> _renegotiateForScreenShare() async {
+    final track =
+        _screenSharing ? _localScreenStream?.getVideoTracks().firstOrNull : null;
+    for (final wrapper in _peers.values) {
+      await _applyScreenTrackToPeer(wrapper, track);
+    }
+    for (final wrapper in _peers.values) {
+      await _sendOffer(wrapper);
+    }
+  }
+
+  Future<void> _applyScreenTrackToPeer(
+      PeerWrapper wrapper, MediaStreamTrack? track) async {
+    await _safeTransceiver('screen.replaceTrack',
+        () => wrapper.screenTransceiver.sender.replaceTrack(track));
+    await _safeTransceiver(
+        'screen.setDirection',
+        () => wrapper.screenTransceiver.setDirection(track != null
+            ? TransceiverDirection.SendRecv
+            : TransceiverDirection.RecvOnly));
+    if (track != null) {
+      await _applyScreenSendLimits(wrapper);
+    }
+  }
+
+  /// 限制屏幕共享的发送码率与帧率（见 screenShareMaxBitrateBps 的说明）。
+  /// 手机屏幕按真实分辨率采集，不设上限会发热掉帧并把上行打满。
+  Future<void> _applyScreenSendLimits(PeerWrapper wrapper) async {
+    try {
+      final params = wrapper.screenTransceiver.sender.parameters;
+      final encodings = params.encodings;
+      if (encodings == null || encodings.isEmpty) return;
+      for (final encoding in encodings) {
+        encoding.maxBitrate = screenShareMaxBitrateBps;
+        encoding.maxFramerate = screenShareMaxFramerate;
+        encoding.active = true;
+      }
+      await wrapper.screenTransceiver.sender.setParameters(params);
+    } catch (e) {
+      _rlog('屏幕共享发送上限设置失败（忽略）: $e');
+    }
+  }
+
+  void _broadcastScreenState(bool sharing) {
+    final channelId = getCurrentVoiceChannelId();
+    if (channelId == null) return;
+    socket
+        .send('screen.state', {'channelId': channelId, 'screenSharing': sharing});
   }
 
   /// 音频输出切换（仅移动端支持；桌面端无此原生方法，静默跳过）。
@@ -298,11 +481,12 @@ class RTCController {
       final wrapper = await _ensurePeer(peerUser, false);
 
       if (type == 'screen.sync_request' || type == 'media.sync_request') {
-        // 移动端 v1 不发送屏幕流；音频补流请求照常应答（刷新 outbound + 重新 offer）
+        // 观众看不到画面时会来补流：只有本端确实在共享时才重新挂轨并重协商；
+        // 没有本地屏幕流时回一轮 offer 也帮不上忙，直接忽略。
         final kind = type == 'screen.sync_request'
             ? 'screen'
             : (payload['kind'] as String? ?? 'screen');
-        if (kind == 'screen') return; // 无本地屏幕流可补
+        if (kind == 'screen' && !_screenSharing) return;
         await _refreshLocalOutboundForNegotiation(wrapper);
         await _sendOffer(wrapper);
         return;
@@ -461,20 +645,30 @@ class RTCController {
             ? TransceiverDirection.SendRecv
             : TransceiverDirection.RecvOnly));
 
-    // 移动端 v1 不发送屏幕音频/视频，保持 recvonly
+    // 移动端不发送屏幕音频（需 AudioPlaybackCapture，flutter_webrtc 未实现），保持 recvonly
     await _safeTransceiver('displayAudio.replaceTrack(null)',
         () => wrapper.displayAudioTransceiver.sender.replaceTrack(null));
     await _safeTransceiver(
         'displayAudio.setDirection',
         () => wrapper.displayAudioTransceiver
             .setDirection(TransceiverDirection.RecvOnly));
-    await _safeTransceiver('screen.replaceTrack(null)',
-        () => wrapper.screenTransceiver.sender.replaceTrack(null));
+
+    // 屏幕视频：正在共享时挂本地屏幕轨并转 SendRecv，否则摘轨回 RecvOnly。
+    // 重连/重协商后必须重新挂一遍，否则共享者断线重连后观众就再也看不到画面。
+    final screenTrack =
+        _screenSharing ? _localScreenStream?.getVideoTracks().firstOrNull : null;
+    await _safeTransceiver('screen.replaceTrack',
+        () => wrapper.screenTransceiver.sender.replaceTrack(screenTrack));
     await _safeTransceiver(
         'screen.setDirection',
-        () => wrapper.screenTransceiver
-            .setDirection(TransceiverDirection.RecvOnly));
-    _rlog('_bindLocalTracks peer=${wrapper.user.id} 完成');
+        () => wrapper.screenTransceiver.setDirection(screenTrack != null
+            ? TransceiverDirection.SendRecv
+            : TransceiverDirection.RecvOnly));
+    if (screenTrack != null) {
+      await _applyScreenSendLimits(wrapper);
+    }
+    _rlog(
+        '_bindLocalTracks peer=${wrapper.user.id} 完成 screenTrack=${screenTrack != null}');
   }
 
   Future<void> _forceRefreshLocalOutboundAfterReconnect(
@@ -805,6 +999,11 @@ class RTCController {
     _clearPeerDisconnectTimer(wrapper.user.id);
     _scheduleStableReset(wrapper);
     _startPeerStats(wrapper);
+    // sender.parameters 里的 encodings 是原生侧在 sender 创建时给的快照，
+    // 协商完成前可能还是空的，这里连上后补设一次屏幕共享的发送上限。
+    if (_screenSharing) {
+      await _applyScreenSendLimits(wrapper);
+    }
   }
 
   Future<void> _sendOffer(PeerWrapper wrapper) async {
