@@ -990,7 +990,8 @@ export async function assembleHLSDownload(
 
 /** 取文件名主体（去掉扩展名），空则回落到 video。 */
 function withMediaExtension(name: string, extension: string): string {
-  const base = (name || "").trim().replace(/\.[a-z0-9]{2,4}$/i, "");
+  const trimmed = (name || "").trim();
+  const base = trimmed.replace(/\.m3u8$/i, "").replace(/\.[a-z0-9]{2,4}$/i, "");
   return `${base || "video"}${extension}`;
 }
 
