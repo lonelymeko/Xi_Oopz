@@ -617,11 +617,14 @@ func (h *Hub) joinChannel(client *Client, channelID int64) error {
 		User:          client.user,
 		ChannelID:     channelID,
 		MicEnabled:    client.micEnabled,
-		ScreenSharing: client.screenSharing,
+		// 新加入频道一律从"未共享屏幕"开始：否则上次共享后未清理的 client.screenSharing
+		// 会被原样广播出去，别人看到你"还在投屏"（网页端/客户端共同踩到的 bug）。
+		ScreenSharing: false,
 	}
 
 	h.mu.Lock()
 	client.currentChannelID = channelID
+	client.screenSharing = false
 	if _, ok := h.channelClients[channelID]; !ok {
 		h.channelClients[channelID] = map[*Client]struct{}{}
 	}
@@ -820,7 +823,10 @@ func (h *Hub) removeUserFromAllVoiceChannels(userID, exceptChannelID int64) {
 				}
 				delete(clients, client)
 				if client.currentChannelID == channelID {
-					client.currentChannelID = 0
+	client.currentChannelID = 0
+	// 离开频道即视为停止共享屏幕：清掉 client 上的残留标记，避免下次进频道时
+	// 又把 screenSharing=true 广播出去（"退出频道后投屏状态仍在"的根因）。
+	client.screenSharing = false
 				}
 			}
 			if len(clients) == 0 {
