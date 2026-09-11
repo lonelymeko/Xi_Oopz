@@ -171,15 +171,11 @@
     align-items: stretch;
   }
 
-  .voice-orb__avatar--sharing,
-  .voice-orb__screen {
-    width: 100%;
-    max-width: 100%;
-  }
-
   .voice-orb__avatar--sharing {
-    height: auto;
-    aspect-ratio: 16 / 9;
+    /* 窄屏也保持头像尺寸：共享画面在 ScreenStage，不替换头像 */
+    width: 68px;
+    max-width: 68px;
+    height: 68px;
   }
 
   .screening-composer,

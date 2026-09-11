@@ -1064,7 +1064,8 @@ button {
 .voice-orb__screen {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  /* 竖屏/横屏共用同一个小窗：用 contain 保证完整显示，避免 cover 把手机竖屏画面裁掉两侧。 */
+  object-fit: contain;
   background: #05080d;
 }
 

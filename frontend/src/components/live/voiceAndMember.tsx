@@ -1,9 +1,10 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type SyntheticEvent } from "react";
 
 import { useSpeakingState } from "../../hooks/useSpeakingState";
 import type { DomainMember, OnlineUserPresence, PeerConnectionDiagnostics, PresenceMember, RemoteMedia, User } from "../../types";
 import { formatPeerDiagnostics, initials } from "../../utils/live";
 import type { ScreenPreview } from "../../types/live";
+import { ScreenShareIcon } from "./icons";
 
 /**
  * 成员列表区块与成员行组件。
@@ -134,78 +135,46 @@ export function MemberRowItem({
 }
 
 /**
- * 语音头像卡片组件，负责显示说话状态与共享预览。
+ * 语音头像卡片：只显示头像 + 说话高亮 + 共享角标。
+ * 共享时**不再把头像换成播放画面**——共享画面统一在列表上方的 ScreenStage 展示，
+ * 点击正在共享的人的头像即选中他的共享。
  */
 export function VoiceAvatarOrb({
   user,
   stream,
-  screenStream,
-  onMaximizeScreen,
   micEnabled,
   screenSharing,
   isCurrentUser,
   diagnostics,
+  onSelectShare,
+  activeShare,
 }: {
   user: User;
   stream: MediaStream | null;
-  screenStream: MediaStream | null;
-  onMaximizeScreen?: () => void;
   micEnabled: boolean;
   screenSharing: boolean;
   isCurrentUser: boolean;
   diagnostics?: PeerConnectionDiagnostics;
+  onSelectShare?: () => void;
+  activeShare?: boolean;
 }) {
   const speaking = useSpeakingState(stream, micEnabled);
-  const previewRef = useRef<HTMLDivElement | null>(null);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-
-  useEffect(() => {
-    const element = videoRef.current;
-    if (!element) {
-      return;
-    }
-    if (!screenSharing || !screenStream) {
-      element.pause();
-      element.srcObject = null;
-      return;
-    }
-
-    // 本地共享开始时，localScreenStream 会先进入 React 状态，screenSharing 随后才变成 true。
-    // 旧逻辑只监听 screenStream：第一次 effect 运行时 video 还没渲染，直接 return；
-    // screenSharing 变 true 后依赖没变化，导致自己的小窗没有绑定 srcObject，表现为黑屏。
-    // 放大弹窗是点击后才挂载的 video，会重新绑定同一个 stream，所以放大后又能看到。
-    // 因此这里同时监听 screenSharing，并在小窗 video 真正渲染后重新挂流播放。
-    if (element.srcObject !== screenStream) {
-      element.srcObject = screenStream;
-    }
-    element.muted = true;
-    element.playsInline = true;
-    void element.play().catch(() => undefined);
-  }, [screenSharing, screenStream]);
-
-  async function openSystemFullscreen() {
-    if (!screenStream || !previewRef.current) return;
-    try {
-      await previewRef.current.requestFullscreen();
-    } catch (error) {
-      console.error(error);
-    }
-  }
+  const selectable = screenSharing && Boolean(onSelectShare);
 
   return (
-    <div className={`voice-orb ${screenSharing && screenStream ? "voice-orb--sharing" : ""}`}>
+    <div className={`voice-orb ${screenSharing ? "voice-orb--sharing" : ""} ${activeShare ? "voice-orb--active" : ""}`}>
       <div
-        ref={previewRef}
-        className={`voice-orb__button ${screenStream ? "voice-orb__button--preview" : ""}`}
-        onClick={screenStream && onMaximizeScreen ? onMaximizeScreen : undefined}
-        role={screenStream ? "button" : undefined}
-        tabIndex={screenStream ? 0 : undefined}
+        className={`voice-orb__button ${selectable ? "voice-orb__button--preview" : ""}`}
+        onClick={selectable ? onSelectShare : undefined}
+        role={selectable ? "button" : undefined}
+        tabIndex={selectable ? 0 : undefined}
+        title={selectable ? `查看 ${user.displayName} 的共享` : undefined}
         onKeyDown={
-          screenStream && onMaximizeScreen
+          selectable
             ? (event) => {
                 if (event.key === "Enter" || event.key === " ") {
                   event.preventDefault();
-                  onMaximizeScreen();
+                  onSelectShare?.();
                 }
               }
             : undefined
@@ -215,41 +184,20 @@ export function VoiceAvatarOrb({
           className={`voice-orb__avatar ${speaking ? "voice-orb__avatar--speaking" : ""} ${screenSharing ? "voice-orb__avatar--sharing" : ""}`}
           style={{ background: user.avatarColor }}
         >
-          {screenSharing && screenStream ? (
-            <>
-              <video ref={videoRef} autoPlay playsInline muted className="voice-orb__screen" />
-              <div className="voice-orb__preview-actions">
-                <button
-                  className="voice-orb__preview-tag"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onMaximizeScreen?.();
-                  }}
-                >
-                  放大
-                </button>
-                <button
-                  className="voice-orb__preview-tag"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void openSystemFullscreen();
-                  }}
-                >
-                  全屏
-                </button>
-              </div>
-            </>
-          ) : (
-            initials(user.displayName)
-          )}
+          {initials(user.displayName)}
+          {screenSharing ? (
+            <span className="voice-orb__share-badge" title="正在共享屏幕">
+              <ScreenShareIcon />
+            </span>
+          ) : null}
         </div>
       </div>
       <strong>{user.displayName}</strong>
       <span>
-        {screenSharing && screenStream
+        {screenSharing
           ? isCurrentUser
-            ? "你 · 正在共享，可放大或全屏"
-            : "正在共享，可放大或全屏"
+            ? "你 · 正在共享"
+            : "正在共享，点头像查看"
           : isCurrentUser
             ? micEnabled
               ? "你 · 麦克风开启"
@@ -259,6 +207,48 @@ export function VoiceAvatarOrb({
               : "已静音"}
       </span>
       {diagnostics ? <span className="voice-orb__diagnostics">{formatPeerDiagnostics(diagnostics)}</span> : null}
+    </div>
+  );
+}
+
+/**
+ * 共享视频舞台：语音区上方展示当前选中的共享画面，点"放大查看"走全屏弹层。
+ */
+export function ScreenStage({
+  stream,
+  title,
+  onMaximize,
+}: {
+  stream: MediaStream;
+  title: string;
+  onMaximize?: () => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+
+  useEffect(() => {
+    const element = videoRef.current;
+    if (!element) return;
+    if (element.srcObject !== stream) {
+      element.srcObject = stream;
+    }
+    element.muted = true;
+    element.playsInline = true;
+    void element.play().catch(() => undefined);
+  }, [stream]);
+
+  return (
+    <div className="screen-stage">
+      <div className="screen-stage__bar">
+        <span className="screen-stage__title">{title}</span>
+        {onMaximize ? (
+          <button className="action-pill" onClick={onMaximize}>
+            放大查看
+          </button>
+        ) : null}
+      </div>
+      <div className="screen-stage__view">
+        <video ref={videoRef} autoPlay playsInline muted className="screen-stage__video" />
+      </div>
     </div>
   );
 }
@@ -349,12 +339,22 @@ export function RemoteAudioLayer({
 export function ScreenPreviewModal({ screen, onClose }: { screen: ScreenPreview; onClose: () => void }) {
   const frameRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [aspect, setAspect] = useState<number | null>(null);
 
   useEffect(() => {
     if (!videoRef.current) return;
     videoRef.current.srcObject = screen.stream;
     void videoRef.current.play().catch(() => undefined);
   }, [screen.stream]);
+
+  // 同一个分享可能是手机竖屏投屏（如 9:19.5），也可能是桌面横屏。用视频真实尺寸驱动
+  // 舞台容器的长宽比，避免把竖屏画面硬塞进固定 16:9 弹窗、四周留下大面积黑边。
+  function syncAspect(event: SyntheticEvent<HTMLVideoElement>) {
+    const video = event.currentTarget;
+    if (video.videoWidth > 0 && video.videoHeight > 0) {
+      setAspect(video.videoWidth / video.videoHeight);
+    }
+  }
 
   async function openSystemFullscreen() {
     if (!frameRef.current) return;
@@ -385,7 +385,20 @@ export function ScreenPreviewModal({ screen, onClose }: { screen: ScreenPreview;
             </button>
           </div>
         </div>
-        <video ref={videoRef} autoPlay playsInline muted className="screen-modal__video" />
+        <div
+          className="screen-modal__stage"
+          style={aspect ? ({ "--screen-aspect": String(aspect) } as CSSProperties) : undefined}
+        >
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            onLoadedMetadata={syncAspect}
+            onResize={syncAspect}
+            className="screen-modal__video"
+          />
+        </div>
       </div>
     </div>
   );

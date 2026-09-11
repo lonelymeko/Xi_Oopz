@@ -766,9 +766,81 @@ body {
 }
 
 .voice-orb__avatar--sharing {
-  width: 228px;
-  height: 128px;
-  border-radius: 20px;
+  /* 共享时头像保持原尺寸：画面统一放到上方 ScreenStage，不再替换头像排布 */
+  width: 68px;
+  height: 68px;
+  border-radius: 28px;
+}
+
+/* 共享视频舞台 */
+.screen-stage {
+  display: grid;
+  gap: 8px;
+  margin: 4px 0 12px;
+}
+
+.screen-stage__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.screen-stage__title {
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.screen-stage__view {
+  border-radius: 16px;
+  overflow: hidden;
+  background: #000;
+  aspect-ratio: 16 / 9;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.screen-stage__video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+
+/* 显示中的人头像角标 + 当前查看选中态 */
+.voice-orb--sharing {
+  min-width: 0;
+}
+
+.voice-orb__share-badge {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: #fbb45b;
+  color: #0b1018;
+  border: 2px solid #171717;
+}
+
+.voice-orb__share-badge svg {
+  width: 12px;
+  height: 12px;
+}
+
+.voice-orb--active .voice-orb__avatar {
+  box-shadow:
+    0 0 0 3px #6de2d2,
+    0 0 16px rgba(109, 226, 210, 0.45);
 }
 
 .voice-orb__preview-actions {
@@ -1117,8 +1189,9 @@ body {
 }
 
 .screen-modal__panel {
-  width: min(92vw, 1480px);
-  height: min(88vh, 900px);
+  width: fit-content;
+  max-width: 92vw;
+  max-height: 88vh;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 16px;
@@ -1127,6 +1200,19 @@ body {
   border: 1px solid var(--line);
   background: rgba(8, 12, 19, 0.98);
   box-shadow: var(--shadow);
+}
+
+/* 舞台容器按视频真实长宽比撑开：桌面横屏按 16:9，手机竖屏投屏会自动变窄变高，
+   不再固定 16:9 弹窗导致竖屏画面两侧大面积黑边。--screen-aspect 由 React 写入。 */
+.screen-modal__stage {
+  --screen-aspect: 1.7778;
+  width: min(calc(92vw - 40px), calc((88vh - 150px) * var(--screen-aspect)));
+  aspect-ratio: var(--screen-aspect);
+  max-height: calc(88vh - 150px);
+  justify-self: center;
+  border-radius: 22px;
+  overflow: hidden;
+  background: #000;
 }
 
 .screen-modal__toolbar {
@@ -1150,6 +1236,7 @@ body {
 .screen-modal__video {
   width: 100%;
   height: 100%;
+  display: block;
   border-radius: 22px;
   object-fit: contain;
   background: #000;
@@ -1158,8 +1245,16 @@ body {
 .screen-modal__panel:fullscreen {
   width: 100vw;
   height: 100vh;
+  max-width: none;
+  max-height: none;
   border-radius: 0;
   padding: 18px;
+}
+
+.screen-modal__panel:fullscreen .screen-modal__stage {
+  width: 100%;
+  max-height: none;
+  aspect-ratio: auto;
 }
 
 .screen-share-sheet {

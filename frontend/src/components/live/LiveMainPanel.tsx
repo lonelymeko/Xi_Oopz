@@ -1,6 +1,6 @@
-import type { RefObject } from "react";
+import { useState, type RefObject } from "react";
 
-import { MemberSection, RemoteAudioLayer, VoiceAvatarOrb } from "./voiceAndMember";
+import { MemberSection, RemoteAudioLayer, ScreenStage, VoiceAvatarOrb } from "./voiceAndMember";
 import { ScreeningPlaylistSection, ScreeningRoomPanel } from "./screening";
 import {
   AudioShareIcon,
@@ -151,6 +151,25 @@ export function LiveMainPanel(props: {
 
   const onlineMemberIds = new Set(onlineUsers.keys());
 
+  // 语音区：共享画面统一在上方 ScreenStage 展示，头像列表保持不动，点头像切换查看谁的共享。
+  const [activeShareKey, setActiveShareKey] = useState<string | null>(null);
+  const shareItems = voiceMembersList
+    .map((member) => {
+      const isSelf = member.user.id === user?.id;
+      const stream = isSelf
+        ? localScreenStream
+        : remoteMedia.get(member.user.id)?.screenStream || null;
+      return {
+        member,
+        isSelf,
+        stream,
+        key: isSelf ? `local-${member.user.id}` : `remote-${member.user.id}`,
+      };
+    })
+    .filter((item) => item.member.screenSharing && item.stream);
+  const activeShare =
+    shareItems.find((item) => item.key === activeShareKey) ?? shareItems[0] ?? null;
+
   return (
     <>
       <main className={`main-panel ${activeScreeningChannel ? "main-panel--screening" : ""}`}>
@@ -216,29 +235,33 @@ export function LiveMainPanel(props: {
                 </button>
               </div>
             </div>
+            {activeShare?.stream ? (
+              <ScreenStage
+                stream={activeShare.stream}
+                title={`${activeShare.member.user.displayName}${activeShare.isSelf ? "（你）" : ""} 的屏幕`}
+                onMaximize={() => setMaximizedScreenKey(activeShare.key)}
+              />
+            ) : null}
             <div className="voice-presence-dock__avatars">
               {voiceMembersList.length ? (
-                voiceMembersList.map((member) => (
-                  <VoiceAvatarOrb
-                    key={member.user.id}
-                    user={member.user}
-                    stream={member.user.id === user?.id ? localAudioStream : remoteMedia.get(member.user.id)?.audioStream || null}
-                    screenStream={member.user.id === user?.id ? localScreenStream : remoteMedia.get(member.user.id)?.screenStream || null}
-                    onMaximizeScreen={
-                      member.user.id === user?.id
-                        ? localScreenStream
-                          ? () => setMaximizedScreenKey(`local-${member.user.id}`)
-                          : undefined
-                        : remoteMedia.get(member.user.id)?.screenStream
-                          ? () => setMaximizedScreenKey(`remote-${member.user.id}`)
-                          : undefined
-                    }
-                    micEnabled={member.user.id === user?.id ? micEnabled : member.micEnabled}
-                    screenSharing={member.screenSharing}
-                    isCurrentUser={member.user.id === user?.id}
-                    diagnostics={peerDiagnostics.get(member.user.id)}
-                  />
-                ))
+                voiceMembersList.map((member) => {
+                  const isSelf = member.user.id === user?.id;
+                  const shareKey = isSelf ? `local-${member.user.id}` : `remote-${member.user.id}`;
+                  const sharingWithStream = shareItems.some((item) => item.key === shareKey);
+                  return (
+                    <VoiceAvatarOrb
+                      key={member.user.id}
+                      user={member.user}
+                      stream={isSelf ? localAudioStream : remoteMedia.get(member.user.id)?.audioStream || null}
+                      micEnabled={isSelf ? micEnabled : member.micEnabled}
+                      screenSharing={member.screenSharing}
+                      isCurrentUser={isSelf}
+                      diagnostics={peerDiagnostics.get(member.user.id)}
+                      onSelectShare={sharingWithStream ? () => setActiveShareKey(shareKey) : undefined}
+                      activeShare={activeShare?.key === shareKey}
+                    />
+                  );
+                })
               ) : (
                 <div className="empty-state empty-state--small">暂无在线语音成员</div>
               )}
