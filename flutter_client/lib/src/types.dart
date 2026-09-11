@@ -196,6 +196,9 @@ class ScreeningState {
   final double currentTime; // 秒
   final double playbackRate;
   final bool awaitingReady;
+  /// 服务端写入的状态更新时间（RFC3339）。用于识别「同一 tick 的重复广播」：
+  /// 只有它严格变新才重锚本地进度，避免观众被旧快照拉回固定某一秒。
+  final String updatedAt;
 
   const ScreeningState({
     required this.channelId,
@@ -207,6 +210,7 @@ class ScreeningState {
     required this.currentTime,
     required this.playbackRate,
     required this.awaitingReady,
+    required this.updatedAt,
   });
 
   bool get isPlaying => playbackState == 'playing';
@@ -222,6 +226,7 @@ class ScreeningState {
         currentTime: (json['currentTime'] as num?)?.toDouble() ?? 0,
         playbackRate: (json['playbackRate'] as num?)?.toDouble() ?? 1,
         awaitingReady: json['awaitingReady'] as bool? ?? false,
+        updatedAt: json['updatedAt'] as String? ?? '',
       );
 }
 

@@ -39,6 +39,14 @@ class ScreeningController {
   bool _initializingVideo = false;
   Timer? _tickTimer;
 
+  // 观众端本地单调时钟锚点（见 _syncViewerToState）：收到 state 时锚定一次，
+  // 之后用本地流逝时间外推目标进度，完全不掺服务端/本机墙钟之差。
+  final Stopwatch _clock = Stopwatch()..start();
+  DateTime? _anchorUpdatedAt;
+  int _anchorAtMs = 0;
+  double _anchorTime = 0;
+  double _anchorRate = 1;
+
   // ---- 对外只读 getter（UI 用）----
   int? get channelId => _channelId;
   ScreeningState? get state => _state;
@@ -69,6 +77,7 @@ class ScreeningController {
     _tickTimer?.cancel();
     _tickTimer = null;
     await _disposeVideo();
+    _resetAnchor();
     _channelId = null;
     _state = null;
     _viewers = const [];
@@ -131,14 +140,55 @@ class ScreeningController {
     _restartTickTimerIfNeeded();
   }
 
+  DateTime? _parseUpdatedAt(String raw) {
+    if (raw.isEmpty) return null;
+    return DateTime.tryParse(raw)?.toUtc();
+  }
+
+  /// 只有服务端 updatedAt 前进（或没有时间戳）才重锚；同一 tick 的重复广播
+  /// （如有人进出触发的 snapshot 复用旧 currentTime）不重锚，避免把观众拉回固定某一秒。
+  bool _shouldReanchor(ScreeningState state) {
+    final next = _parseUpdatedAt(state.updatedAt);
+    if (next == null) return true;
+    final prev = _anchorUpdatedAt;
+    return prev == null || next.isAfter(prev);
+  }
+
+  void _resetAnchor() {
+    _anchorUpdatedAt = null;
+    _anchorAtMs = 0;
+    _anchorTime = 0;
+    _anchorRate = 1;
+  }
+
   Future<void> _syncViewerToState(ScreeningState state) async {
     final v = _video;
     if (v == null || !v.value.isInitialized) return;
-    // 进度纠偏
-    final pos = v.value.position.inMilliseconds / 1000.0;
-    if ((pos - state.currentTime).abs() > _driftThresholdSeconds) {
-      await v.seekTo(Duration(milliseconds: (state.currentTime * 1000).round()));
+
+    if (_shouldReanchor(state)) {
+      _anchorUpdatedAt = _parseUpdatedAt(state.updatedAt) ?? _anchorUpdatedAt;
+      _anchorAtMs = _clock.elapsedMilliseconds;
+      _anchorTime = state.currentTime;
+      _anchorRate = state.playbackRate > 0 ? state.playbackRate : 1;
     }
+
+    // 播放中：用本地单调时钟从锚点外推目标进度，完全不掺服务端/本机墙钟之差；
+    // 暂停中：目标就是静态 currentTime。
+    final double target;
+    if (state.isPlaying) {
+      final elapsedSec = (_clock.elapsedMilliseconds - _anchorAtMs) / 1000.0;
+      target = _anchorTime + elapsedSec * _anchorRate;
+    } else {
+      target = state.currentTime;
+    }
+
+    // 只在有数据、非缓冲时纠偏，避免「buffering→seek→再 buffering」自持循环。
+    final pos = v.value.position.inMilliseconds / 1000.0;
+    if (!v.value.isBuffering &&
+        (pos - target).abs() > _driftThresholdSeconds) {
+      await v.seekTo(Duration(milliseconds: (target * 1000).round()));
+    }
+
     // 播放态对齐
     if (state.isPlaying && !v.value.isPlaying) {
       await v.play();
@@ -149,6 +199,7 @@ class ScreeningController {
 
   Future<void> _loadVideo(String url) async {
     await _disposeVideo();
+    _resetAnchor();
     _loadedUrl = url;
     if (url.isEmpty) {
       onChanged();
@@ -268,10 +319,12 @@ class ScreeningController {
         currentTime: s.currentTime,
         playbackRate: s.playbackRate,
         awaitingReady: s.awaitingReady,
+        updatedAt: s.updatedAt,
       );
 
   Future<void> dispose() async {
     _tickTimer?.cancel();
     await _disposeVideo();
+    _resetAnchor();
   }
 }

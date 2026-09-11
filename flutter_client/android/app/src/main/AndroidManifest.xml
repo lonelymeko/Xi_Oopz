@@ -45,12 +45,16 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
-        <!-- 后台保活前台服务（flutter_foreground_task）：麦克风连麦 + 视频播放 + 屏幕共享。
-             该插件用 ServiceInfo.FOREGROUND_SERVICE_TYPE_MANIFEST 启动前台服务，
-             所以这里声明的类型就是运行时实际生效的类型集合，必须包含 mediaProjection。 -->
+        <!-- 语音连麦后台保活前台服务。
+             注意：manifest 声明了哪些类型，不代表启动时都会带上 —— 由 CallForegroundService
+             按运行时状态动态选择位掩码：进语音只用 microphone|mediaPlayback，用户授权屏幕
+             采集后才补上 mediaProjection。这是 Android 14+ 上「只进语音挂后台就断线」的修复点
+             （带 mediaProjection 启动 FGS 需要屏幕采集授权，否则 startForeground 抛
+             SecurityException，前台服务根本起不来）。 -->
         <service
-            android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
+            android:name=".CallForegroundService"
             android:foregroundServiceType="microphone|mediaPlayback|mediaProjection"
+            android:stopWithTask="false"
             android:exported="false" />
     </application>
     <queries>

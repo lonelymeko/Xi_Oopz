@@ -14,12 +14,22 @@ dependencies:
   web_socket_channel: ^3.0.1
   http: ^1.2.1
   video_player: ^2.9.2
+  # Windows/Linux 桌面端 video_player 没有原生实现（只有 android/ios/macos/web），
+  # 放映室会直接「视频加载失败」。用 media_kit 作后端给 video_player 补上桌面实现：
+  # 只需在 main 里 ensureInitialized(windows: true)，原有 VideoPlayerController 代码不用改。
+  video_player_media_kit: ^2.0.0
+  media_kit_libs_windows_video: ^1.0.11
   # 本地持久化：保存登录态（token / 服务器 / 用户）
   shared_preferences: ^2.3.2
-  # Android 后台保活：前台服务（语音不被杀）
-  flutter_foreground_task: ^8.17.0
+  # Android 后台保活走原生 CallForegroundService（见 android/.../CallForegroundService.kt），
+  # 不再依赖 flutter_foreground_task：它的 FGS 类型固定为 manifest 全集，Android 14+
+  # 会因为带上 mediaProjection 而在纯语音场景直接启动失败。
   # Android 画中画：视频进后台小窗继续播放
   floating: ^6.0.0
+  # 桌面端无边框窗口：自定义标题栏、拖动、最小化/最大化/关闭
+  window_manager: ^0.5.2
+  # 桌面端打开外部链接（GitHub 项目地址）
+  url_launcher: ^6.3.1
 
 dev_dependencies:
   flutter_test:

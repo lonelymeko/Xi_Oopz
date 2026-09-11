@@ -12,3 +12,7 @@ GeneratedPluginRegistrant.java
 key.properties
 **/*.keystore
 **/*.jks
+
+# 本机相关（org.gradle.java.home 等机器路径），不入库
+/gradle.properties
+.kotlin/

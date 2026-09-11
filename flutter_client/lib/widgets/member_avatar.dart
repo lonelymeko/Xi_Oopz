@@ -1,12 +1,19 @@
 import 'package:flutter/material.dart';
 
 import '../oopz_rtc.dart';
+import '../src/skin.dart';
 
 class MemberAvatar extends StatelessWidget {
   final PresenceMember member;
   final bool isSelf;
   final PeerDiagnostics? diag;
   final bool compact;
+  /// 点击（如：点正在共享的人的头像 → 查看其共享）。
+  final VoidCallback? onTap;
+  /// 是否为当前正在观看的共享者（高亮边框）。
+  final bool active;
+  /// 是否正在说话（有音频活动才亮，不是开麦就亮）。
+  final bool speaking;
 
   const MemberAvatar({
     super.key,
@@ -14,6 +21,9 @@ class MemberAvatar extends StatelessWidget {
     required this.isSelf,
     this.diag,
     this.compact = false,
+    this.onTap,
+    this.active = false,
+    this.speaking = false,
   });
 
   Color _parseAvatarColor(String hex) {
@@ -40,10 +50,11 @@ class MemberAvatar extends StatelessWidget {
     final size = compact ? 52.0 : 88.0;
     final avatarColor = _parseAvatarColor(member.user.avatarColor);
     final err = Theme.of(context).colorScheme.error;
-    final ringColor =
-        member.micEnabled ? const Color(0xFF6DE2D2) : const Color(0xFF3A3A3A);
+    final ringColor = active
+        ? const Color(0xFFFBB45B)
+        : (speaking ? AppSkin.preset.accent : const Color(0xFF3A3A3A));
 
-    return Column(
+    final content = Column(
       mainAxisSize: MainAxisSize.min,
       children: [
         Stack(
@@ -55,7 +66,19 @@ class MemberAvatar extends StatelessWidget {
               height: size,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                border: Border.all(color: ringColor, width: 2.5),
+                border: Border.all(
+                  color: ringColor,
+                  width: (active || speaking) ? 3 : 2.5,
+                ),
+                boxShadow: speaking
+                    ? [
+                        BoxShadow(
+                          color: AppSkin.preset.accent.withValues(alpha: 0.5),
+                          blurRadius: 18,
+                          spreadRadius: 1,
+                        ),
+                      ]
+                    : null,
               ),
               padding: const EdgeInsets.all(3),
               child: CircleAvatar(
@@ -108,6 +131,13 @@ class MemberAvatar extends StatelessWidget {
             ),
           ),
       ],
+    );
+
+    if (onTap == null) return content;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(14),
+      child: content,
     );
   }
 

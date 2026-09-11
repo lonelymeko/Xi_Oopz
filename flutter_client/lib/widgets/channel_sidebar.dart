@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../oopz_rtc.dart';
+import '../src/skin.dart';
 
 /// 频道侧边栏：按 文字 / 语音 / 放映室 分组列出频道，高亮当前查看的频道。
 /// 语音 / 放映频道下方显示当前在场成员头像与人数（对齐 Web 端）。
@@ -12,6 +13,7 @@ class ChannelSidebar extends StatelessWidget {
   final int? joinedVoiceChannelId; // 我当前所在的语音/放映频道
   final Map<int, List<OopzUser>> membersByChannel;
   final Map<int, int> onlineCounts;
+  final Set<int> speakingUserIds; // 正在说话的成员 id（用于头像高亮）
   final ValueChanged<ChannelInfo> onSelect;
   final VoidCallback onDomainTap; // 点域名 → 打开域切换器
   final VoidCallback onMeTap; // 点左下角头像 → 账号菜单（退出登录）
@@ -25,6 +27,7 @@ class ChannelSidebar extends StatelessWidget {
     required this.joinedVoiceChannelId,
     required this.membersByChannel,
     required this.onlineCounts,
+    required this.speakingUserIds,
     required this.onSelect,
     required this.onDomainTap,
     required this.onMeTap,
@@ -38,7 +41,7 @@ class ChannelSidebar extends StatelessWidget {
 
     return Container(
       width: 240,
-      color: const Color(0xFF171717),
+      color: AppSkin.preset.surface,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -97,7 +100,10 @@ class ChannelSidebar extends StatelessWidget {
         if (members.isNotEmpty)
           Padding(
             padding: const EdgeInsets.fromLTRB(34, 2, 12, 4),
-            child: _MemberChips(members: members),
+            child: _MemberChips(
+              members: members,
+              speakingUserIds: speakingUserIds,
+            ),
           ),
       ],
     );
@@ -126,7 +132,7 @@ class _ChannelTile extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
       child: Material(
-        color: selected ? const Color(0xFF2A2A2A) : Colors.transparent,
+        color: selected ? AppSkin.preset.surfaceHigh : Colors.transparent,
         borderRadius: BorderRadius.circular(8),
         child: InkWell(
           borderRadius: BorderRadius.circular(8),
@@ -138,7 +144,7 @@ class _ChannelTile extends StatelessWidget {
                 Icon(icon,
                     size: 18,
                     color: joinedHere
-                        ? const Color(0xFF6DE2D2)
+                        ? AppSkin.preset.accent
                         : (selected ? Colors.white : Colors.white54)),
                 const SizedBox(width: 8),
                 Expanded(
@@ -168,7 +174,8 @@ class _ChannelTile extends StatelessWidget {
 
 class _MemberChips extends StatelessWidget {
   final List<OopzUser> members;
-  const _MemberChips({required this.members});
+  final Set<int> speakingUserIds;
+  const _MemberChips({required this.members, required this.speakingUserIds});
 
   Color _avatarColor(String hex) {
     try {
@@ -185,41 +192,63 @@ class _MemberChips extends StatelessWidget {
       runSpacing: 4,
       children: [
         for (final u in members)
-          Container(
-            padding: const EdgeInsets.only(right: 8),
-            decoration: BoxDecoration(
-              color: const Color(0xFF222222),
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                CircleAvatar(
-                  radius: 9,
-                  backgroundColor: _avatarColor(u.avatarColor),
-                  child: Text(
-                    u.displayName.isNotEmpty
-                        ? u.displayName[0].toUpperCase()
-                        : '?',
-                    style: const TextStyle(
-                        color: Color(0xFF051017),
-                        fontSize: 9,
-                        fontWeight: FontWeight.w700),
+          Builder(builder: (_) {
+            final speaking = speakingUserIds.contains(u.id);
+            return Container(
+              padding: const EdgeInsets.only(right: 8),
+              decoration: BoxDecoration(
+                color: speaking
+                    ? const Color(0xFF1E3A36)
+                    : const Color(0xFF222222),
+                borderRadius: BorderRadius.circular(20),
+                border: speaking
+                    ? Border.all(color: const Color(0xFF6DE2D2), width: 1)
+                    : null,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    decoration: speaking
+                        ? const BoxDecoration(
+                            shape: BoxShape.circle,
+                            boxShadow: [
+                              BoxShadow(
+                                  color: Color(0x996DE2D2),
+                                  blurRadius: 6,
+                                  spreadRadius: 1),
+                            ],
+                          )
+                        : null,
+                    child: CircleAvatar(
+                      radius: 9,
+                      backgroundColor: _avatarColor(u.avatarColor),
+                      child: Text(
+                        u.displayName.isNotEmpty
+                            ? u.displayName[0].toUpperCase()
+                            : '?',
+                        style: const TextStyle(
+                            color: Color(0xFF051017),
+                            fontSize: 9,
+                            fontWeight: FontWeight.w700),
+                      ),
+                    ),
                   ),
-                ),
-                const SizedBox(width: 4),
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 90),
-                  child: Text(
-                    u.displayName,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        fontSize: 11, color: Colors.white60),
+                  const SizedBox(width: 4),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 90),
+                    child: Text(
+                      u.displayName,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          fontSize: 11,
+                          color: speaking ? Colors.white : Colors.white60),
+                    ),
                   ),
-                ),
-              ],
-            ),
-          ),
+                ],
+              ),
+            );
+          }),
       ],
     );
   }

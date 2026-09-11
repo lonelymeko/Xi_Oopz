@@ -1,10 +1,42 @@
+import 'dart:io' show Platform;
+
 import 'package:flutter/material.dart';
+import 'package:video_player_media_kit/video_player_media_kit.dart';
+import 'package:window_manager/window_manager.dart';
 
 import 'oopz_rtc.dart';
 import 'pages/home_page.dart';
 import 'pages/login_page.dart';
+import 'src/skin.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // 桌面端：无边框窗口（自定义顶部标题栏 + 拖动 + 最小化/最大化/关闭）。
+  if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+    await windowManager.ensureInitialized();
+    const windowOptions = WindowOptions(
+      size: Size(1280, 800),
+      minimumSize: Size(1000, 640),
+      center: true,
+      title: 'Oopz Live',
+      titleBarStyle: TitleBarStyle.hidden,
+    );
+    await windowManager.waitUntilReadyToShow(windowOptions, () async {
+      await windowManager.show();
+      await windowManager.focus();
+    });
+  }
+
+  // 桌面端（Windows/Linux）video_player 没有官方实现，放映室视频会加载失败；
+  // 这里用 media_kit 作为其后端，注册后 VideoPlayerController 即可正常播放。
+  if (Platform.isWindows) {
+    VideoPlayerMediaKit.ensureInitialized(windows: true);
+  }
+
+  // 读取上次选择的皮肤。
+  await AppSkin.load();
+
   // 把 Flutter 框架错误的完整堆栈用醒目 tag 打到 console/logcat，方便真机抓栈：
   // adb logcat | grep OOPZ-ERR
   final previous = FlutterError.onError;
@@ -21,33 +53,40 @@ class OopzApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Oopz Live',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        brightness: Brightness.dark,
-        scaffoldBackgroundColor: const Color(0xFF121212),
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF6DE2D2),
-          brightness: Brightness.dark,
-          surface: const Color(0xFF1E1E1E),
-        ),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Color(0xFF121212),
-          elevation: 0,
-          scrolledUnderElevation: 0,
-        ),
-        inputDecorationTheme: InputDecorationTheme(
-          filled: true,
-          fillColor: const Color(0xFF1E1E1E),
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(10),
-            borderSide: BorderSide.none,
+    // 监听皮肤变化，重建整棵主题。
+    return ValueListenableBuilder<String>(
+      valueListenable: AppSkin.currentId,
+      builder: (context, _, __) {
+        final skin = AppSkin.preset;
+        return MaterialApp(
+          title: 'Oopz Live',
+          debugShowCheckedModeBanner: false,
+          theme: ThemeData(
+            brightness: Brightness.dark,
+            scaffoldBackgroundColor: skin.base,
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: skin.accent,
+              brightness: Brightness.dark,
+              surface: skin.surface,
+            ),
+            appBarTheme: AppBarTheme(
+              backgroundColor: skin.base,
+              elevation: 0,
+              scrolledUnderElevation: 0,
+            ),
+            inputDecorationTheme: InputDecorationTheme(
+              filled: true,
+              fillColor: skin.surface,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
+                borderSide: BorderSide.none,
+              ),
+            ),
+            useMaterial3: true,
           ),
-        ),
-        useMaterial3: true,
-      ),
-      home: const AuthGate(),
+          home: const AuthGate(),
+        );
+      },
     );
   }
 }

@@ -1,87 +1,79 @@
 import 'dart:io' show Platform;
 
-import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'package:flutter/services.dart';
 
-/// 前台服务的任务入口（必须是顶层函数 + vm:entry-point）。
-/// 我们只需要「保活」，不做周期任务，所以处理器是空的。
-@pragma('vm:entry-point')
-void _keepAliveCallback() {
-  FlutterForegroundTask.setTaskHandler(_KeepAliveHandler());
-}
-
-class _KeepAliveHandler extends TaskHandler {
-  @override
-  Future<void> onStart(DateTime timestamp, TaskStarter starter) async {}
-  @override
-  void onRepeatEvent(DateTime timestamp) {}
-  @override
-  Future<void> onDestroy(DateTime timestamp) async {}
-}
-
-/// Android 后台保活：用前台服务（带常驻通知）把进程保持在前台，
-/// 避免系统在切后台/息屏时杀掉进程而中断语音连麦。
+/// Android 后台保活：调用原生 `CallForegroundService`（带常驻通知的前台服务），
+/// 保证切后台/息屏时麦克风采集与 WebSocket 心跳不被系统收回。
+///
+/// 为什么不用 flutter_foreground_task：该插件固定以
+/// ServiceInfo.FOREGROUND_SERVICE_TYPE_MANIFEST 启动服务，会把 manifest 里所有类型
+/// 一次性带上去。Android 14+ 只要带上 mediaProjection，就必须先拿到屏幕采集授权，
+/// 否则 startForeground 抛 SecurityException，前台服务起不来 —— 表现就是「只是进个
+/// 语音频道挂后台，几秒后通话就断」。原生服务按运行时状态动态选择类型位掩码即可绕开。
+///
 /// 仅 Android 生效；其它平台所有方法都是空操作。
 class BackgroundKeepAlive {
-  static bool get _supported => Platform.isAndroid;
-  static bool _initialized = false;
+  static const MethodChannel _channel = MethodChannel('oopz/foreground');
 
-  static void _ensureInit() {
-    if (!_supported || _initialized) return;
-    _initialized = true;
-    FlutterForegroundTask.init(
-      androidNotificationOptions: AndroidNotificationOptions(
-        channelId: 'oopz_voice_keepalive',
-        channelName: 'Oopz 语音保活',
-        channelDescription: '保持语音连麦在后台运行',
-        channelImportance: NotificationChannelImportance.LOW,
-        priority: NotificationPriority.LOW,
-      ),
-      iosNotificationOptions: const IOSNotificationOptions(),
-      foregroundTaskOptions: ForegroundTaskOptions(
-        eventAction: ForegroundTaskEventAction.nothing(),
-        allowWakeLock: true,
-      ),
-    );
+  static bool get _supported => Platform.isAndroid;
+
+  static String _lastTitle = 'Oopz Live';
+  static String _lastText = '正在连麦中';
+
+  static Future<void> _invoke(String method, [Map<String, dynamic>? args]) async {
+    if (!_supported) return;
+    try {
+      await _channel.invokeMethod(method, args);
+    } on MissingPluginException {
+      // 原生侧未注册（如热重载/其它平台）时静默忽略，不能因此打断通话。
+    } on PlatformException {
+      // 保活失败不阻断主流程；下一次状态变更会重试。
+    }
   }
 
-  /// 进入语音/放映室时调用：拉起前台服务。
+  /// 进入语音/放映室、以及在场成员数变化时调用：启动或更新前台服务。
   static Future<void> start({
     required String title,
     required String text,
+    bool screenSharing = false,
   }) async {
     if (!_supported) return;
-    _ensureInit();
-    await FlutterForegroundTask.requestNotificationPermission();
-    if (await FlutterForegroundTask.isRunningService) {
-      await FlutterForegroundTask.updateService(
-          notificationTitle: title, notificationText: text);
-      return;
-    }
-    await FlutterForegroundTask.startService(
-      serviceId: 1001,
-      notificationTitle: title,
-      notificationText: text,
-      callback: _keepAliveCallback,
-    );
+    _lastTitle = title;
+    _lastText = text;
+    await _invoke('start', {
+      'title': title,
+      'text': text,
+      'screenSharing': screenSharing,
+    });
   }
 
-  /// 离开语音/放映室时调用：停掉前台服务。
+  /// 离开语音/放映室时调用：停掉前台服务并移除通知。
   static Future<void> stop() async {
     if (!_supported) return;
-    if (await FlutterForegroundTask.isRunningService) {
-      await FlutterForegroundTask.stopService();
-    }
+    await _invoke('stop');
   }
 
-  /// 发起屏幕共享前调用：确保前台服务已在运行。
-  ///
-  /// Android 14(API 34) 起，MediaProjection 必须运行在 foregroundServiceType 含
-  /// mediaProjection 的前台服务里（类型在 AndroidManifest 中声明，插件以
-  /// FOREGROUND_SERVICE_TYPE_MANIFEST 启动），否则 getDisplayMedia 会直接抛
-  /// SecurityException 崩溃。正常流程里进语音频道时已拉起前台服务，这里只做兜底，
-  /// 顺带把常驻通知文案切成“正在共享屏幕”。
-  static Future<void> ensureForScreenShare() async {
+  /// 发起屏幕共享前调用（必须在用户已授权采集之后）：把前台服务类型升级到含
+  /// mediaProjection。Android 14+ 要求 getDisplayMedia/getMediaProjection 之前，
+  /// 已有该类型的前台服务在运行。
+  static Future<void> startScreenShare() async {
     if (!_supported) return;
-    await start(title: 'Oopz · 屏幕共享中', text: '正在把屏幕内容共享给频道成员');
+    _lastText = '正在共享屏幕';
+    await _invoke('start', {
+      'title': _lastTitle,
+      'text': _lastText,
+      'screenSharing': true,
+    });
+  }
+
+  /// 停止屏幕共享后调用：降级回语音保活（仍然保留 microphone|mediaPlayback）。
+  static Future<void> stopScreenShare() async {
+    if (!_supported) return;
+    _lastText = '正在连麦中';
+    await _invoke('start', {
+      'title': _lastTitle,
+      'text': _lastText,
+      'screenSharing': false,
+    });
   }
 }

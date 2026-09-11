@@ -79,7 +79,7 @@ class RTCController {
   static const int peerReconnectMaxAttempts = 4;
   static const int turnDisconnectGraceMs = 1000;
   static const int iceRestartTimeoutMs = 4000;
-  static const int peerStatsIntervalMs = 3000;
+  static const int peerStatsIntervalMs = 1500;
   static const int iceGatheringEvalDelayMs = 800;
   static const int peerStableResetMs = 8000;
   static const List<int> outboundRehydrateDelaysMs = [300, 1200];
@@ -112,14 +112,21 @@ class RTCController {
       onDiagnosticsChanged;
   final void Function(MediaStream? stream) onLocalAudioChanged;
   final void Function(bool sharing) onScreenSharingChanged;
+  /// 是否正在"只共享系统音频"（无画面）状态变化。
+  final void Function(bool sharing) onAudioOnlySharingChanged;
   final void Function(String kind, String title, String message) onNotice;
+  /// 活跃说话者集合变化（用于成员列表"正在说话"高亮）。
+  final void Function(Set<int> userIds) onSpeakingChanged;
 
   final Stopwatch _clock = Stopwatch()..start();
 
   MediaStream? _localAudioStream;
   MediaStream? _localScreenStream;
+  String? _audioInputDeviceId; // 选中的麦克风设备 id；null = 系统默认
+  String? _audioOutputDeviceId; // 选中的扬声器设备 id；null = ADM 默认
   bool _micEnabled = true;
   bool _screenSharing = false;
+  bool _audioOnlySharing = false; // 只共享系统音频（无画面）
   bool _voiceSessionActive = false;
 
   final Map<int, PeerWrapper> _peers = {};
@@ -133,6 +140,9 @@ class RTCController {
   final Map<int, int> _lastResetSentAt = {};
   final Map<int, int> _outageNoticeAt = {};
   final Map<int, PeerDiagnostics> _diagnostics = {};
+  final Set<int> _speakingUsers = {};
+  final Map<int, int> _speakingUntil = {}; // 说话高亮保持到期时间
+  static const int speakingHoldMs = 1500;
 
   RTCController({
     required this.socket,
@@ -144,7 +154,9 @@ class RTCController {
     required this.onDiagnosticsChanged,
     required this.onLocalAudioChanged,
     required this.onScreenSharingChanged,
+    required this.onAudioOnlySharingChanged,
     required this.onNotice,
+    required this.onSpeakingChanged,
   });
 
   int get _nowMs => _clock.elapsedMilliseconds;
@@ -153,6 +165,9 @@ class RTCController {
 
   /// 当前是否正在向频道共享屏幕（发送端状态）。
   bool get screenSharing => _screenSharing;
+
+  /// 本地屏幕采集流（屏幕共享时含视频；只共享音频时仅音频有用）。用于本地预览。
+  MediaStream? get localScreenStream => _localScreenStream;
 
   // ------------------------------------------------------------------
   // 生命周期
@@ -167,7 +182,40 @@ class RTCController {
       _rlog('joinVoice 麦克风采集失败: $e');
       onNotice('error', '麦克风不可用', '$e');
     }
+    // Windows 上 flutter_webrtc 不会自动初始化 ADM 播放设备，不处理的话「听不到别人说话」。
+    await _ensureDesktopAudioOutput();
     socket.send('channel.join', {'channelId': channelId});
+  }
+
+  /// Windows 桌面端修复「连麦听不到对方」：
+  ///
+  /// flutter_webrtc 1.5.2 只在 getUserMedia 时、且请求里带了能匹配到「播放设备」的
+  /// deviceId 才会调用 SetPlayoutDevice；默认（无 deviceId）时永远不调用，导致 ADM
+  /// 播放管线一直处于未初始化状态 —— 远端音频收到、解码，但从不渲染到扬声器。
+  /// 这里主动 enumerate 输出设备并 selectAudioOutput(默认设备)，触发 SetPlayoutDevice，
+  /// 把播放管线激活。必须在 getUserMedia 之后调用（否则设备列表为空）。
+  /// 仅 Windows 生效（macOS/Linux 无此问题，避免副作用）。
+  Future<void> _ensureDesktopAudioOutput() async {
+    if (!Platform.isWindows) return;
+    if (_audioOutputDeviceId == null) {
+      final outputs = await listAudioOutputs();
+      final preferred = _pickPreferred(outputs);
+      if (preferred != null) {
+        _audioOutputDeviceId = preferred.deviceId;
+        _rlog('自动选择扬声器 -> ${preferred.label}');
+      }
+    }
+    final id = _audioOutputDeviceId;
+    if (id == null || id.isEmpty) {
+      _rlog('selectAudioOutput 跳过（无可用输出设备）');
+      return;
+    }
+    try {
+      await Helper.selectAudioOutput(id);
+      _rlog('selectAudioOutput -> $id');
+    } catch (e) {
+      _rlog('selectAudioOutput 失败（忽略）: $e');
+    }
   }
 
   Future<void> leaveVoice() async {
@@ -178,11 +226,18 @@ class RTCController {
     if (_screenSharing) {
       await stopScreenShare(renegotiate: false);
     }
+    if (_audioOnlySharing) {
+      await stopAudioOnlyShare(renegotiate: false);
+    }
     final channelId = getCurrentVoiceChannelId();
     if (channelId != null) {
       socket.send('channel.leave', {'channelId': channelId});
     }
     await _closeAllPeers();
+    if (_speakingUsers.isNotEmpty) {
+      _speakingUsers.clear();
+      onSpeakingChanged(const <int>{});
+    }
     await _stopTrackGroup(_localAudioStream);
     _localAudioStream = null;
     _peerEnsureFutures.clear();
@@ -208,28 +263,79 @@ class RTCController {
   // 屏幕共享（发送端）
   // ------------------------------------------------------------------
 
+  /// 组装 getDisplayMedia 约束。
+  /// - 桌面端（Windows/Linux）：先经 desktopCapturer 选一个屏幕/窗口源，再带 `audio:true`
+  ///   采集系统声音（Windows 走 WASAPI loopback；flutter_webrtc 源码里 audio:true 会
+  ///   创建 loopback 音频源）。没有音频设备时会自动降级为无音频。
+  /// - macOS：整屏需先 requestCapturePermission，音频策略保守关闭（避免回归）。
+  /// - 移动端：只共享画面（系统音频依赖 AudioPlaybackCapture，flutter_webrtc 未实现）。
+  Future<Map<String, dynamic>> _buildDisplayMediaConstraints(
+      {required bool shareAudio}) async {
+    if (Platform.isAndroid || Platform.isIOS) {
+      return {'video': true, 'audio': false};
+    }
+    final wantAudio =
+        shareAudio && !Platform.isAndroid && !Platform.isIOS;
+    try {
+      final sources = await desktopCapturer.getSources(
+        types: const [SourceType.Screen, SourceType.Window],
+      );
+      if (sources.isNotEmpty) {
+        DesktopCapturerSource chosen = sources.first;
+        for (final s in sources) {
+          if (s.type == SourceType.Screen) {
+            chosen = s;
+            break;
+          }
+        }
+        _rlog('getDisplayMedia 选源 id=${chosen.id} name=${chosen.name} '
+            'audio=$wantAudio');
+        return {
+          'video': {
+            'deviceId': {'exact': chosen.id},
+            'mandatory': {'frameRate': 30},
+          },
+          'audio': wantAudio,
+        };
+      }
+    } catch (e) {
+      _rlog('desktopCapturer.getSources 失败（回退默认屏）: $e');
+    }
+    return {
+      'video': {
+        'deviceId': {'exact': '0'},
+        'mandatory': {'frameRate': 30},
+      },
+      'audio': wantAudio,
+    };
+  }
+
   /// 发起屏幕共享，与 Web 端 rtc.ts 的 startScreenShare 对齐：
   /// 采集 → 挂到已协商好的 screenTransceiver 并切成 SendRecv → 广播 screen.state。
   /// 协议与 Web 端一致，Web/其它端无需改动即可观看。
   ///
+  /// [shareAudio] 为 true 时一并共享系统音频（Windows 走 WASAPI loopback）。
   /// 返回 false 表示用户取消授权或采集失败（取消属于正常路径，调用方不必报错弹窗）。
-  Future<bool> startScreenShare() async {
+  Future<bool> startScreenShare({bool? shareAudio}) async {
     if (_screenSharing) return true;
     if (!_voiceSessionActive) {
       onNotice('error', '无法共享屏幕', '请先进入语音频道');
       return false;
     }
+    final wantAudio = shareAudio ?? Platform.isWindows;
+    // 已在"只共享音频"时先停掉，避免同一路系统音频被采集两次。
+    if (_audioOnlySharing) {
+      await stopAudioOnlyShare(renegotiate: false);
+    }
     try {
-      // Android 14(API 34)+ 必须先把 foregroundServiceType 含 mediaProjection 的前台
-      // 服务拉起来再取投影，否则 getMediaProjection 会抛 SecurityException 直接崩。
-      // 进语音频道时通常已在运行，这里兜底并改通知文案。
-      await BackgroundKeepAlive.ensureForScreenShare();
-
-      // Android/macOS 先显式请求采集授权：
-      // - Android 14+ 传 fullScreenOnly 可强制整屏，避免用户只选到“单个应用”
-      //   导致观众只看到一小块画面；
-      // - 拿到授权后 getDisplayMedia 会复用这次返回的投影令牌，不会再弹第二次框。
-      // 用户取消时直接返回 false，属于正常路径，不该弹错误。
+      // 顺序很关键（Android 14/API 34+）：
+      // 1) 先请求屏幕采集授权。用户同意后系统才把 android:project_media 授予本应用；
+      // 2) 拿到授权后才能让前台服务带上 mediaProjection 类型启动。若提前带，startForeground
+      //    会因缺授权抛 SecurityException，前台服务起不来，连语音保活都会被拖垮；
+      // 3) 最后 getDisplayMedia 内部调 getMediaProjection，此时前台服务已就绪。
+      //
+      // Android/macOS 传 fullScreenOnly 可强制整屏，避免用户只选到“单个应用”导致观众
+      // 只看到一小块画面；拿到授权后 getDisplayMedia 会复用这次返回的投影令牌，不会再弹框。
       if (Platform.isAndroid || Platform.isMacOS) {
         final granted = await Helper.requestCapturePermission(
             fullScreenOnly: screenShareFullScreenOnly);
@@ -238,12 +344,10 @@ class RTCController {
           return false;
         }
       }
+      await BackgroundKeepAlive.startScreenShare();
 
-      final stream = await navigator.mediaDevices.getDisplayMedia({
-        'video': true,
-        // 手机端系统音频要走 AudioPlaybackCapture，flutter_webrtc 未实现，显式关闭。
-        'audio': false,
-      });
+      final stream = await navigator.mediaDevices
+          .getDisplayMedia(await _buildDisplayMediaConstraints(shareAudio: wantAudio));
       final track = stream.getVideoTracks().firstOrNull;
       if (track == null) {
         await _stopTrackGroup(stream);
@@ -270,7 +374,10 @@ class RTCController {
       await _teardownLocalScreenStream();
       for (final wrapper in _peers.values.toList(growable: false)) {
         await _applyScreenTrackToPeer(wrapper, null);
+        await _applyDisplayAudioTrackToPeer(wrapper, null);
       }
+      // 采集/前台服务失败时把前台服务降级回纯语音保活，别把连麦一起带崩。
+      await BackgroundKeepAlive.stopScreenShare();
       onScreenSharingChanged(false);
       onNotice('error', '屏幕共享失败', '$e');
       return false;
@@ -295,8 +402,71 @@ class RTCController {
       if (notifyServer) {
         _broadcastScreenState(false);
       }
+      // 结束共享后前台服务降级回纯语音保活（microphone|mediaPlayback），通知文案回到“正在连麦中”。
+      await BackgroundKeepAlive.stopScreenShare();
       onScreenSharingChanged(false);
       _rlog('stopScreenShare 完成');
+    }
+  }
+
+  bool get audioOnlySharing => _audioOnlySharing;
+
+  /// 只共享系统音频（无画面）：getDisplayMedia 采到后立刻丢掉视频轨只留音轨，
+  /// 挂到第二条 audio transceiver（displayAudio）并重协商。协议与 Web 端一致。
+  Future<bool> startAudioOnlyShare() async {
+    if (_audioOnlySharing) return true;
+    if (!_voiceSessionActive) {
+      onNotice('error', '无法共享音频', '请先进入语音频道');
+      return false;
+    }
+    if (_screenSharing) {
+      await stopScreenShare();
+    }
+    try {
+      // 注意：千万不要停掉视频轨！flutter_webrtc Windows 上屏幕视频与 WASAPI loopback
+      // 音频共用同一个 desktop capturer 生命周期，stop 视频轨会连带停掉 loopback
+      //（表现就是"只共享音频没声音"）。这里保留视频轨但**不挂到任何 transceiver**，
+      // 因而不发送画面；只把音频挂到 displayAudio 发出去。
+      final stream = await navigator.mediaDevices.getDisplayMedia(
+          await _buildDisplayMediaConstraints(shareAudio: true));
+      final audioTrack = stream.getAudioTracks().firstOrNull;
+      if (audioTrack == null) {
+        await _stopTrackGroup(stream);
+        onNotice('error', '共享音频失败', '未捕获到系统音频，请检查系统权限');
+        return false;
+      }
+      audioTrack.onEnded = () {
+        unawaited(stopAudioOnlyShare());
+      };
+      _localScreenStream = stream;
+      _audioOnlySharing = true;
+      await _renegotiateForScreenShare();
+      onAudioOnlySharingChanged(true);
+      _rlog('startAudioOnlyShare 成功');
+      return true;
+    } catch (e) {
+      _rlog('startAudioOnlyShare 失败: $e');
+      _audioOnlySharing = false;
+      await _teardownLocalScreenStream();
+      for (final wrapper in _peers.values.toList(growable: false)) {
+        await _applyDisplayAudioTrackToPeer(wrapper, null);
+      }
+      onAudioOnlySharingChanged(false);
+      onNotice('error', '共享音频失败', '$e');
+      return false;
+    }
+  }
+
+  Future<void> stopAudioOnlyShare({bool renegotiate = true}) async {
+    final was = _audioOnlySharing;
+    _audioOnlySharing = false;
+    final track = _localScreenStream?.getAudioTracks().firstOrNull;
+    track?.onEnded = null;
+    await _teardownLocalScreenStream();
+    if (was) {
+      if (renegotiate) await _renegotiateForScreenShare();
+      onAudioOnlySharingChanged(false);
+      _rlog('stopAudioOnlyShare 完成');
     }
   }
 
@@ -309,14 +479,31 @@ class RTCController {
   /// 屏幕共享开关后：先把屏幕轨挂到每条 peer 上，再补一轮 offer 触发重协商。
   /// 只挂轨不发 offer 的话，观众那边的 SDP 仍是 recvonly，看不到画面。
   Future<void> _renegotiateForScreenShare() async {
-    final track =
+    final videoTrack =
         _screenSharing ? _localScreenStream?.getVideoTracks().firstOrNull : null;
+    final displayAudioTrack = (_screenSharing || _audioOnlySharing)
+        ? _localScreenStream?.getAudioTracks().firstOrNull
+        : null;
     for (final wrapper in _peers.values) {
-      await _applyScreenTrackToPeer(wrapper, track);
+      await _applyScreenTrackToPeer(wrapper, videoTrack);
+      await _applyDisplayAudioTrackToPeer(wrapper, displayAudioTrack);
     }
     for (final wrapper in _peers.values) {
-      await _sendOffer(wrapper);
+      await _sendOffer(wrapper, force: true);
     }
+  }
+
+  /// 把屏幕共享音频轨挂到第二条 audio transceiver（displayAudio）上并转 SendRecv；
+  /// [track] 为 null 时摘轨回 RecvOnly。Web 端按第二条 audio 识别为共享音频，协议一致。
+  Future<void> _applyDisplayAudioTrackToPeer(
+      PeerWrapper wrapper, MediaStreamTrack? track) async {
+    await _safeTransceiver('displayAudio.replaceTrack',
+        () => wrapper.displayAudioTransceiver.sender.replaceTrack(track));
+    await _safeTransceiver(
+        'displayAudio.setDirection',
+        () => wrapper.displayAudioTransceiver.setDirection(track != null
+            ? TransceiverDirection.SendRecv
+            : TransceiverDirection.RecvOnly));
   }
 
   Future<void> _applyScreenTrackToPeer(
@@ -358,11 +545,17 @@ class RTCController {
         .send('screen.state', {'channelId': channelId, 'screenSharing': sharing});
   }
 
-  /// 音频输出切换（仅移动端支持；桌面端无此原生方法，静默跳过）。
+  /// 音频输出切换（仅 Android/iOS 支持）。
+  ///
+  /// 注意：Windows/Linux 桌面端 flutter_webrtc 未实现这两个原生方法，调用会触发插件内
+  /// std::bad_variant_access → CRT invalid parameter handler → __fastfail(c0000409)，
+  /// 直接把进程打崩（表现就是 joinVoice 后立刻「闪退」）。Dart 侧 try/catch 抓不到这种
+  /// 原生崩溃，必须在调用前用平台判断挡住，桌面端直接跳过。
   ///
   /// [on] 为 false 时不强制听筒，而是交给 flutter_webrtc 的
   /// “优先蓝牙/有线耳机，否则扬声器”策略，避免蓝牙耳机连接后仍被外放抢占。
   Future<void> setSpeakerphone(bool on) async {
+    if (!Platform.isAndroid && !Platform.isIOS) return;
     try {
       if (on) {
         await Helper.setSpeakerphoneOn(true);
@@ -421,6 +614,9 @@ class RTCController {
     _failedPeers.remove(userId);
     _peerRebuildCounts.remove(userId);
     _outageNoticeAt.remove(userId);
+    if (_speakingUsers.remove(userId)) {
+      onSpeakingChanged(Set.of(_speakingUsers));
+    }
     _destroyPeer(userId);
   }
 
@@ -428,6 +624,15 @@ class RTCController {
     if (!_voiceSessionActive) return;
     if (!screenSharing) {
       _clearMediaReconnect(userId, 'screen');
+      // 远端停止共享：立刻清掉画面。不能只等远端 track ended——网页端可能只是停止
+      // 发送而不结束轨道，导致本端一直停在"投屏界面"。
+      final media = _remoteMedia[userId];
+      if (media != null &&
+          (media.screenStream != null || media.displayAudioStream != null)) {
+        media.screenStream = null;
+        media.displayAudioStream = null;
+        onMediaChanged(Map.of(_remoteMedia));
+      }
       return;
     }
     _ensureMediaFlow(userId, 'screen', 'screen.state');
@@ -577,15 +782,73 @@ class RTCController {
   // 本地音频
   // ------------------------------------------------------------------
 
-  Future<MediaStream> _ensureAudio() async {
-    final existing = _localAudioStream;
-    if (existing != null) return existing;
-    final stream = await navigator.mediaDevices.getUserMedia({
-      'audio': {
+  /// 音频采集约束。
+  /// flutter_webrtc 约定：麦克风设备放 `optional[].sourceId`，而 `deviceId` 指的是
+  /// **扬声器**（见 flutter_media_stream.cc GetUserAudio：sourceId→SetRecordingDevice，
+  /// deviceId→SetPlayoutDevice）。这样一次 getUserMedia 就能同时绑定输入与输出。
+  Map<String, dynamic> _audioConstraints() => {
         'echoCancellation': true,
         'noiseSuppression': true,
         'autoGainControl': true,
-      },
+        if (_audioInputDeviceId != null && _audioInputDeviceId!.isNotEmpty)
+          'optional': [
+            {'sourceId': _audioInputDeviceId},
+          ],
+        if (Platform.isWindows &&
+            _audioOutputDeviceId != null &&
+            _audioOutputDeviceId!.isNotEmpty)
+          'deviceId': _audioOutputDeviceId,
+      };
+
+  /// 虚拟音频设备标签特征（Windows 上这些端点通常不出声/不采集）。
+  static const List<String> _virtualAudioHints = [
+    'voicemeeter',
+    'vb-audio',
+    'cable',
+    'steam',
+    'broadcast',
+    'nvidia',
+    'virtual',
+  ];
+
+  /// 从设备列表里挑一个"看起来真实"的设备（避开虚拟声卡）；没有更优时退回第一个有名字的。
+  static MediaDeviceInfo? _pickPreferred(List<MediaDeviceInfo> devices) {
+    if (devices.isEmpty) return null;
+    bool virtual(MediaDeviceInfo d) {
+      final l = d.label.toLowerCase();
+      return _virtualAudioHints.any(l.contains);
+    }
+
+    final named = devices.where((d) => d.label.isNotEmpty).toList();
+    final real = named.where((d) => !virtual(d)).toList();
+    if (real.isNotEmpty) return real.first;
+    if (named.isNotEmpty) return named.first;
+    return devices.first;
+  }
+
+  Future<MediaStream> _ensureAudio() async {
+    final existing = _localAudioStream;
+    if (existing != null) return existing;
+    // 用户没选麦克风时，先挑一个真实设备：Windows 上 ADM 默认 index 0 往往是虚拟声卡，
+    // 直接用默认会采到静音（表现为"别人听不到我"）。
+    if (_audioInputDeviceId == null) {
+      final inputs = await listAudioInputs();
+      final preferred = _pickPreferred(inputs);
+      if (preferred != null) {
+        _audioInputDeviceId = preferred.deviceId;
+        _rlog('自动选择麦克风 -> ${preferred.label}');
+      }
+    }
+    if (Platform.isWindows && _audioOutputDeviceId == null) {
+      final outputs = await listAudioOutputs();
+      final preferred = _pickPreferred(outputs);
+      if (preferred != null) {
+        _audioOutputDeviceId = preferred.deviceId;
+        _rlog('自动选择扬声器 -> ${preferred.label}');
+      }
+    }
+    final stream = await navigator.mediaDevices.getUserMedia({
+      'audio': _audioConstraints(),
       'video': false,
     });
     for (final track in stream.getAudioTracks()) {
@@ -594,6 +857,101 @@ class RTCController {
     _localAudioStream = stream;
     onLocalAudioChanged(stream);
     return stream;
+  }
+
+  /// 桌面端在没进过语音时 ADM 尚未初始化，`enumerateDevices` 会返回空列表
+  /// （表现：设备菜单只有一个"系统默认"）。这里用一次瞬时的 getUserMedia 触发
+  /// ADM 初始化，拿到设备后立刻停掉轨道，不影响通话状态。
+  Future<void> primeAudioDevices() async {
+    if (_localAudioStream != null) return;
+    if (Platform.isAndroid || Platform.isIOS) return;
+    try {
+      final stream = await navigator.mediaDevices.getUserMedia({
+        'audio': true,
+        'video': false,
+      });
+      await _stopTrackGroup(stream);
+      _rlog('primeAudioDevices 完成（已初始化音频设备列表）');
+    } catch (e) {
+      _rlog('primeAudioDevices 失败: $e');
+    }
+  }
+
+  /// 当前选中的麦克风 deviceId（null = 系统默认）。
+  String? get audioInputDeviceId => _audioInputDeviceId;
+
+  /// 枚举可用麦克风。需先 getUserMedia 过一次（否则设备列表可能为空/无 label）。
+  Future<List<MediaDeviceInfo>> listAudioInputs() async {
+    try {
+      final devices = await navigator.mediaDevices.enumerateDevices();
+      return devices.where((d) => d.kind == 'audioinput').toList();
+    } catch (e) {
+      _rlog('enumerateDevices(audioinput) 失败: $e');
+      return const [];
+    }
+  }
+
+  /// 当前选中的扬声器 deviceId（null = ADM 默认）。
+  String? get audioOutputDeviceId => _audioOutputDeviceId;
+
+  /// 枚举可用扬声器（Windows 桌面支持；移动端无 audiooutput）。
+  Future<List<MediaDeviceInfo>> listAudioOutputs() async {
+    try {
+      final devices = await navigator.mediaDevices.enumerateDevices();
+      return devices.where((d) => d.kind == 'audiooutput').toList();
+    } catch (e) {
+      _rlog('enumerateDevices(audiooutput) 失败: $e');
+      return const [];
+    }
+  }
+
+  /// 选择扬声器输出设备。连麦中立即切换；未连麦只记住，进房时生效。仅 Windows 有效。
+  Future<void> setAudioOutput(String? deviceId) async {
+    _audioOutputDeviceId = (deviceId == null || deviceId.isEmpty) ? null : deviceId;
+    if (!Platform.isWindows || _audioOutputDeviceId == null) return;
+    if (!_voiceSessionActive) return;
+    try {
+      await Helper.selectAudioOutput(_audioOutputDeviceId!);
+      _rlog('setAudioOutput -> $_audioOutputDeviceId');
+    } catch (e) {
+      _rlog('setAudioOutput 失败: $e');
+      onNotice('error', '切换扬声器失败', '$e');
+    }
+  }
+
+  /// 选择麦克风。未连麦时只记住选择，下次 joinVoice 生效；连麦中则重新采集，
+  /// 并对所有 peer 的 audio sender replaceTrack 换轨，不打断通话、不重新协商。
+  Future<void> setMicrophone(String? deviceId) async {
+    final next = (deviceId == null || deviceId.isEmpty) ? null : deviceId;
+    if (_audioInputDeviceId == next) return;
+    _audioInputDeviceId = next;
+    if (!_voiceSessionActive) return;
+
+    final old = _localAudioStream;
+    try {
+      final stream = await navigator.mediaDevices.getUserMedia({
+        'audio': _audioConstraints(),
+        'video': false,
+      });
+      final newTrack = stream.getAudioTracks().firstOrNull;
+      if (newTrack == null) {
+        await _stopTrackGroup(stream);
+        onNotice('error', '切换麦克风失败', '没有取到音频轨道');
+        return;
+      }
+      newTrack.enabled = _micEnabled;
+      _localAudioStream = stream;
+      onLocalAudioChanged(stream);
+      for (final wrapper in _peers.values) {
+        await _safeTransceiver('audio.replaceTrack(switchMic)',
+            () => wrapper.audioTransceiver.sender.replaceTrack(newTrack));
+      }
+      if (old != null) await _stopTrackGroup(old);
+      _rlog('setMicrophone -> ${_audioInputDeviceId ?? "默认"}');
+    } catch (e) {
+      _rlog('setMicrophone 失败: $e');
+      onNotice('error', '切换麦克风失败', '$e');
+    }
   }
 
   /// 桌面端（macOS/Windows/Linux）flutter_webrtc 首次协商后 transceiver 引用会失效，
@@ -644,13 +1002,18 @@ class RTCController {
             ? TransceiverDirection.SendRecv
             : TransceiverDirection.RecvOnly));
 
-    // 移动端不发送屏幕音频（需 AudioPlaybackCapture，flutter_webrtc 未实现），保持 recvonly
-    await _safeTransceiver('displayAudio.replaceTrack(null)',
-        () => wrapper.displayAudioTransceiver.sender.replaceTrack(null));
+    // 屏幕共享音频：桌面端（Windows loopback）在共享时挂本地屏幕音频轨并 SendRecv；
+    // 移动端没有屏幕音频，保持 recvonly。重连/重协商后同样要重挂。
+    final displayAudioTrack = (_screenSharing || _audioOnlySharing)
+        ? _localScreenStream?.getAudioTracks().firstOrNull
+        : null;
+    await _safeTransceiver('displayAudio.replaceTrack',
+        () => wrapper.displayAudioTransceiver.sender.replaceTrack(displayAudioTrack));
     await _safeTransceiver(
         'displayAudio.setDirection',
-        () => wrapper.displayAudioTransceiver
-            .setDirection(TransceiverDirection.RecvOnly));
+        () => wrapper.displayAudioTransceiver.setDirection(displayAudioTrack != null
+            ? TransceiverDirection.SendRecv
+            : TransceiverDirection.RecvOnly));
 
     // 屏幕视频：正在共享时挂本地屏幕轨并转 SendRecv，否则摘轨回 RecvOnly。
     // 重连/重协商后必须重新挂一遍，否则共享者断线重连后观众就再也看不到画面。
@@ -1005,10 +1368,11 @@ class RTCController {
     }
   }
 
-  Future<void> _sendOffer(PeerWrapper wrapper) async {
-    // 桌面端：初次协商完成后不再主动发 offer（in-place 重新协商在 macOS 上
-    // setLocalDescription 会失败并引发重连风暴）。需要恢复时走全量 _recreatePeer。
-    if (_isDesktop && wrapper.negotiatedOnce) {
+  Future<void> _sendOffer(PeerWrapper wrapper, {bool force = false}) async {
+    // 桌面端：初次协商完成后默认不再主动发 offer（in-place 重新协商在 macOS 上
+    // setLocalDescription 会失败并引发重连风暴）。但屏幕共享的开关**必须**重协商，
+    // 否则远端（网页）收不到共享轨；屏幕共享场景传 force=true 放行。
+    if (!force && _isDesktop && wrapper.negotiatedOnce) {
       _rlog('_sendOffer peer=${wrapper.user.id} 跳过：桌面端已协商，不做 in-place 重新协商');
       return;
     }
@@ -1447,14 +1811,64 @@ class RTCController {
     try {
       final stats = await wrapper.pc.getStats();
       // 出站音频诊断：确认麦克风 RTP 是否真的在发包（排查单向无声）
+      double localMicLevel = 0;
       for (final report in stats) {
         if (report.type == 'outbound-rtp' && report.values['kind'] == 'audio') {
           _rlog(
               '出站音频 peer=${wrapper.user.id} bytesSent=${report.values['bytesSent']} packetsSent=${report.values['packetsSent']}');
         }
         if (report.type == 'media-source' && report.values['kind'] == 'audio') {
+          final lv = report.values['audioLevel'];
+          if (lv is num && lv.toDouble() > localMicLevel) {
+            localMicLevel = lv.toDouble();
+          }
           _rlog(
               '麦克风源 peer=${wrapper.user.id} audioLevel=${report.values['audioLevel']}');
+        }
+      }
+      // 入站音频活动检测：用于放映室/成员列表「正在说话」高亮。
+      // 取该 peer 全部 inbound-rtp audio 轨的最大 audioLevel（0~1）。
+      double inboundLevel = 0;
+      for (final report in stats) {
+        if (report.type == 'inbound-rtp' &&
+            report.values['kind'] == 'audio') {
+          final lv = report.values['audioLevel'];
+          if (lv is num && lv.toDouble() > inboundLevel) {
+            inboundLevel = lv.toDouble();
+          }
+        }
+      }
+      // 说话高亮：检测到音频活动就点亮，并保持一小段时间，避免两次采样之间闪烁。
+      if (inboundLevel > 0.02) {
+        _speakingUntil[wrapper.user.id] = _nowMs + speakingHoldMs;
+      }
+      final heldSpeaking = (_speakingUntil[wrapper.user.id] ?? 0) > _nowMs;
+      final wasSpeaking = _speakingUsers.contains(wrapper.user.id);
+      if (heldSpeaking != wasSpeaking) {
+        if (heldSpeaking) {
+          _speakingUsers.add(wrapper.user.id);
+        } else {
+          _speakingUsers.remove(wrapper.user.id);
+          _speakingUntil.remove(wrapper.user.id);
+        }
+        onSpeakingChanged(Set.of(_speakingUsers));
+      }
+      // 本端自己：用 outbound 的麦克风电平判断自己是否在说话。
+      final selfId = getCurrentUser()?.id;
+      if (selfId != null) {
+        if (localMicLevel > 0.02) {
+          _speakingUntil[selfId] = _nowMs + speakingHoldMs;
+        }
+        final heldSelf = (_speakingUntil[selfId] ?? 0) > _nowMs;
+        final wasSelf = _speakingUsers.contains(selfId);
+        if (heldSelf != wasSelf) {
+          if (heldSelf) {
+            _speakingUsers.add(selfId);
+          } else {
+            _speakingUsers.remove(selfId);
+            _speakingUntil.remove(selfId);
+          }
+          onSpeakingChanged(Set.of(_speakingUsers));
         }
       }
       final reports = <String, StatsReport>{};

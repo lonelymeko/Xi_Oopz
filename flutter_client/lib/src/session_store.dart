@@ -45,4 +45,40 @@ class SessionStore {
     await prefs.remove(_kBaseUrl);
     await prefs.remove(_kAuth);
   }
+
+  static const _kMicDeviceId = 'audio.micDeviceId';
+
+  /// 读取上次选择的麦克风 deviceId（null = 系统默认）。
+  static Future<String?> loadMicDeviceId() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_kMicDeviceId);
+  }
+
+  /// 记住选择的麦克风 deviceId（传 null/空串表示恢复系统默认）。
+  static Future<void> saveMicDeviceId(String? deviceId) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (deviceId == null || deviceId.isEmpty) {
+      await prefs.remove(_kMicDeviceId);
+    } else {
+      await prefs.setString(_kMicDeviceId, deviceId);
+    }
+  }
+
+  static const _kSpeakerDeviceId = 'audio.speakerDeviceId';
+
+  /// 读取上次选择的扬声器 deviceId（null = ADM 默认）。
+  static Future<String?> loadSpeakerDeviceId() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_kSpeakerDeviceId);
+  }
+
+  /// 记住选择的扬声器 deviceId。
+  static Future<void> saveSpeakerDeviceId(String? deviceId) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (deviceId == null || deviceId.isEmpty) {
+      await prefs.remove(_kSpeakerDeviceId);
+    } else {
+      await prefs.setString(_kSpeakerDeviceId, deviceId);
+    }
+  }
 }
