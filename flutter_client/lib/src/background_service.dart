@@ -72,4 +72,16 @@ class BackgroundKeepAlive {
       await FlutterForegroundTask.stopService();
     }
   }
+
+  /// 发起屏幕共享前调用：确保前台服务已在运行。
+  ///
+  /// Android 14(API 34) 起，MediaProjection 必须运行在 foregroundServiceType 含
+  /// mediaProjection 的前台服务里（类型在 AndroidManifest 中声明，插件以
+  /// FOREGROUND_SERVICE_TYPE_MANIFEST 启动），否则 getDisplayMedia 会直接抛
+  /// SecurityException 崩溃。正常流程里进语音频道时已拉起前台服务，这里只做兜底，
+  /// 顺带把常驻通知文案切成“正在共享屏幕”。
+  static Future<void> ensureForScreenShare() async {
+    if (!_supported) return;
+    await start(title: 'Oopz · 屏幕共享中', text: '正在把屏幕内容共享给频道成员');
+  }
 }

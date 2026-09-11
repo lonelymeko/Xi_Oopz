@@ -11,6 +11,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- 屏幕共享：Android 14(API 34) 起 MediaProjection 必须运行在 foregroundServiceType
+         含 mediaProjection 的前台服务中，且需声明本权限，否则 getMediaProjection 直接抛
+         SecurityException 崩溃。flutter_webrtc 只负责弹系统授权框、不起前台服务，须由 App 补齐。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
@@ -41,10 +45,12 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
-        <!-- 后台保活前台服务（flutter_foreground_task）：麦克风连麦 + 视频播放 -->
+        <!-- 后台保活前台服务（flutter_foreground_task）：麦克风连麦 + 视频播放 + 屏幕共享。
+             该插件用 ServiceInfo.FOREGROUND_SERVICE_TYPE_MANIFEST 启动前台服务，
+             所以这里声明的类型就是运行时实际生效的类型集合，必须包含 mediaProjection。 -->
         <service
             android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
-            android:foregroundServiceType="microphone|mediaPlayback"
+            android:foregroundServiceType="microphone|mediaPlayback|mediaProjection"
             android:exported="false" />
     </application>
     <queries>
