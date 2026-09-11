@@ -268,8 +268,7 @@ class RTCController {
       _rlog('startScreenShare 失败: $e');
       _screenSharing = false;
       await _teardownLocalScreenStream();
-      // 采集/挂轨中途失败时，把可能已经挂上的（已停止的）轨道摘干净
-      for (final wrapper in _peers.values) {
+      for (final wrapper in _peers.values.toList(growable: false)) {
         await _applyScreenTrackToPeer(wrapper, null);
       }
       onScreenSharingChanged(false);
