@@ -770,6 +770,8 @@ body {
   width: 68px;
   height: 68px;
   border-radius: 28px;
+  /* base.css 里共享态设为 transparent（原为隐藏播放窗下的首字母），这里恢复，否则头像空成一片 */
+  color: #051017;
 }
 
 /* 共享视频舞台 */
@@ -800,6 +802,9 @@ body {
   overflow: hidden;
   background: #000;
   aspect-ratio: 16 / 9;
+  /* 限高：否则投屏舞台按宽度撑得很高，把下面聊天面板顶出视口（聊天消失/滑不动）。 */
+  max-height: 46vh;
+  width: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
