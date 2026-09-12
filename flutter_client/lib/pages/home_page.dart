@@ -139,6 +139,8 @@ class _HomePageState extends State<HomePage> {
       final savedSpeaker = await SessionStore.loadSpeakerDeviceId();
       _speakerDeviceId = savedSpeaker;
       unawaited(_rtc!.setAudioOutput(savedSpeaker));
+      // 启动即预热音频（初始化 ADM + 选好真实麦克风/扬声器），避免进房默认设备不生效。
+      unawaited(_rtc!.warmupAudio());
 
       _screening = ScreeningController(
         socket: socket,
@@ -332,6 +334,15 @@ class _HomePageState extends State<HomePage> {
             ),
             const Divider(height: 1, color: Color(0xFF2A2A2A)),
             ListTile(
+              leading: const Icon(Icons.settings, color: Color(0xFF6DE2D2)),
+              title: const Text('设置'),
+              subtitle: const Text('默认麦克风 / 扬声器'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _showSettings();
+              },
+            ),
+            ListTile(
               leading: const Icon(Icons.palette_outlined,
                   color: Color(0xFF6DE2D2)),
               title: const Text('切换皮肤'),
@@ -500,6 +511,114 @@ class _HomePageState extends State<HomePage> {
     );
     if (mounted) setState(() {});
   }
+
+  Future<void> _applyMic(String? id) async {
+    await _rtc?.setMicrophone(id);
+    await SessionStore.saveMicDeviceId(id);
+    if (!mounted) return;
+    setState(() => _micDeviceId = id);
+    await _refreshMicLabel();
+  }
+
+  Future<void> _applySpeaker(String? id) async {
+    await _rtc?.setAudioOutput(id);
+    await SessionStore.saveSpeakerDeviceId(id);
+    if (!mounted) return;
+    setState(() => _speakerDeviceId = id);
+    await _refreshSpeakerLabel();
+  }
+
+  /// 设置：选择默认麦克风 / 扬声器（持久化，下次启动预热时生效）。
+  Future<void> _showSettings() async {
+    final rtc = _rtc;
+    if (rtc == null) return;
+    var mics = await rtc.listAudioInputs();
+    if (mics.isEmpty) {
+      await rtc.primeAudioDevices();
+      mics = await rtc.listAudioInputs();
+    }
+    final speakers = await rtc.listAudioOutputs();
+    if (!mounted) return;
+    final result = await showModalBottomSheet<(String, String?)>(
+      context: context,
+      backgroundColor: AppSkin.preset.surface,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: ConstrainedBox(
+          constraints:
+              BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.78),
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              _settingsHeader('默认麦克风'),
+              _settingsTile(
+                icon: Icons.settings_voice,
+                label: '系统默认',
+                selected: _micDeviceId == null,
+                onTap: () => Navigator.pop(ctx, ('mic', null)),
+              ),
+              for (final d in mics)
+                _settingsTile(
+                  icon: Icons.mic_none,
+                  label: _deviceLabel(d),
+                  selected: _micDeviceId == d.deviceId,
+                  onTap: () => Navigator.pop(ctx, ('mic', d.deviceId)),
+                ),
+              const Divider(height: 1, color: Color(0xFF2A2A2A)),
+              _settingsHeader('默认扬声器'),
+              _settingsTile(
+                icon: Icons.speaker,
+                label: '系统默认',
+                selected: _speakerDeviceId == null,
+                onTap: () => Navigator.pop(ctx, ('speaker', null)),
+              ),
+              for (final d in speakers)
+                _settingsTile(
+                  icon: Icons.speaker,
+                  label: _deviceLabel(d),
+                  selected: _speakerDeviceId == d.deviceId,
+                  onTap: () => Navigator.pop(ctx, ('speaker', d.deviceId)),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (!mounted || result == null) return;
+    if (result.$1 == 'mic') {
+      await _applyMic(result.$2);
+    } else {
+      await _applySpeaker(result.$2);
+    }
+  }
+
+  Widget _settingsHeader(String title) => Padding(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 6),
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: Text(title,
+              style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.white70)),
+        ),
+      );
+
+  Widget _settingsTile({
+    required IconData icon,
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+  }) =>
+      ListTile(
+        leading: Icon(icon,
+            color: selected ? AppSkin.preset.accent : Colors.white54),
+        title: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
+        trailing:
+            selected ? Icon(Icons.check, color: AppSkin.preset.accent) : null,
+        onTap: onTap,
+      );
 
   Future<void> _openGithub() async {
     final uri = Uri.parse('https://github.com/lonelymeko/Xi_Oopz');
@@ -1071,20 +1190,8 @@ class _HomePageState extends State<HomePage> {
         speakerDeviceId: _speakerDeviceId,
         loadMics: _loadMicItems,
         loadSpeakers: _loadSpeakerItems,
-        onSelectMic: (id) async {
-          await _rtc?.setMicrophone(id);
-          await SessionStore.saveMicDeviceId(id);
-          if (!mounted) return;
-          setState(() => _micDeviceId = id);
-          await _refreshMicLabel();
-        },
-        onSelectSpeaker: (id) async {
-          await _rtc?.setAudioOutput(id);
-          await SessionStore.saveSpeakerDeviceId(id);
-          if (!mounted) return;
-          setState(() => _speakerDeviceId = id);
-          await _refreshSpeakerLabel();
-        },
+        onSelectMic: _applyMic,
+        onSelectSpeaker: _applySpeaker,
         onToggleMic: () async {
           final next = !_micEnabled;
           await _rtc?.toggleMic(next);

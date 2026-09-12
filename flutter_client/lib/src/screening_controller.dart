@@ -38,6 +38,7 @@ class ScreeningController {
   String _loadedUrl = '';
   bool _initializingVideo = false;
   Timer? _tickTimer;
+  String _lastEndedItemId = ''; // 防止同一集重复上报 ended
 
   // 观众端本地单调时钟锚点（见 _syncViewerToState）：收到 state 时锚定一次，
   // 之后用本地流逝时间外推目标进度，完全不掺服务端/本机墙钟之差。
@@ -200,6 +201,7 @@ class ScreeningController {
   Future<void> _loadVideo(String url) async {
     await _disposeVideo();
     _resetAnchor();
+    _lastEndedItemId = '';
     _loadedUrl = url;
     if (url.isEmpty) {
       onChanged();
@@ -210,6 +212,7 @@ class ScreeningController {
     try {
       final controller = VideoPlayerController.networkUrl(Uri.parse(url));
       _video = controller;
+      controller.addListener(_onVideoChanged);
       await controller.initialize();
       _initializingVideo = false;
       final s = _state;
@@ -224,11 +227,33 @@ class ScreeningController {
     }
   }
 
+  /// 控制者：视频播放结束自动切下一条。发 screening.item.ended，由后端推进播放列表
+  /// 并广播新状态（与 Web 端 screening.tsx 的 handleEnded 一致）。
+  void _onVideoChanged() {
+    final v = _video;
+    if (v == null || !v.value.isInitialized) return;
+    if (!isController) return;
+    final s = _state;
+    if (s == null || s.currentItemId.isEmpty) return;
+    if (!v.value.isCompleted) return;
+    if (_lastEndedItemId == s.currentItemId) return;
+    _lastEndedItemId = s.currentItemId;
+    final id = _channelId;
+    if (id == null) return;
+    socket.send('screening.item.ended', {
+      'channelId': id,
+      'itemId': s.currentItemId,
+      'currentTime': 0,
+      'playbackRate': s.playbackRate,
+    });
+  }
+
   Future<void> _disposeVideo() async {
     final old = _video;
     _video = null;
     _loadedUrl = '';
     if (old != null) {
+      old.removeListener(_onVideoChanged);
       await old.pause();
       await old.dispose();
     }

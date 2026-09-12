@@ -877,6 +877,40 @@ class RTCController {
     }
   }
 
+  /// 启动时就预热音频（对齐浏览器）：初始化 ADM、枚举并选定真实麦克风/扬声器。
+  /// 不预热的话，首次进房时设备列表为空、"默认设备"往往是虚拟声卡，导致默认麦克风
+  /// 不生效（必须手动切换设备才出声）。
+  Future<void> warmupAudio() async {
+    if (Platform.isAndroid || Platform.isIOS) return;
+    try {
+      await primeAudioDevices(); // 触发 ADM 初始化，设备列表才可用
+      if (_audioInputDeviceId == null) {
+        final inputs = await listAudioInputs();
+        final preferred = _pickPreferred(inputs);
+        if (preferred != null) {
+          _audioInputDeviceId = preferred.deviceId;
+          try {
+            await Helper.selectAudioInput(preferred.deviceId);
+          } catch (_) {}
+          _rlog('warmup 选麦克风 -> ${preferred.label}');
+        }
+      }
+      if (_audioOutputDeviceId == null) {
+        final outputs = await listAudioOutputs();
+        final preferred = _pickPreferred(outputs);
+        if (preferred != null) {
+          _audioOutputDeviceId = preferred.deviceId;
+          try {
+            await Helper.selectAudioOutput(preferred.deviceId);
+          } catch (_) {}
+          _rlog('warmup 选扬声器 -> ${preferred.label}');
+        }
+      }
+    } catch (e) {
+      _rlog('warmupAudio 失败: $e');
+    }
+  }
+
   /// 当前选中的麦克风 deviceId（null = 系统默认）。
   String? get audioInputDeviceId => _audioInputDeviceId;
 
