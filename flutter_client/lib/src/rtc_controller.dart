@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show Platform;
 
@@ -525,7 +525,6 @@ class RTCController {
     for (final wrapper in _peers.values) {
       await _sendOffer(wrapper, force: true);
     }
-    await _logAudioSenders('共享后');
   }
 
   /// 实际用于「麦克风 sender」的轨道。
@@ -553,34 +552,6 @@ class RTCController {
         () => wrapper.audioTransceiver.setDirection(track != null
             ? TransceiverDirection.SendRecv
             : TransceiverDirection.RecvOnly));
-  }
-
-  /// 诊断：打印每个 peer 上音频 sender 实际挂的轨道，确认共享前后「麦克风轨」没被
-  /// 系统音频轨顶掉/摘掉（排查"投屏+音频覆盖麦克风"）。
-  Future<void> _logAudioSenders(String tag) async {
-    final micId = _localAudioStream?.getAudioTracks().firstOrNull?.id;
-    final dispId = _localScreenStream?.getAudioTracks().firstOrNull?.id;
-    final micDev = _localAudioStream == null
-        ? '-'
-        : _audioTrackDeviceId(_localAudioStream!);
-    _rlog(
-        '[$tag] 音轨 本端mic=$micId(dev=$micDev) display=$dispId screenSharing=$_screenSharing audioOnly=$_audioOnlySharing');
-    for (final wrapper in _peers.values) {
-      try {
-        final senders = await wrapper.pc.getSenders();
-        for (final s in senders) {
-          if (s.track?.kind != 'audio') continue;
-          final tid = s.track?.id;
-          final which = tid == micId
-              ? 'MIC'
-              : (tid == dispId ? 'DISPLAY' : (tid == null ? 'NULL' : 'OTHER'));
-          _rlog(
-              '[$tag] peer=${wrapper.user.id} audio sender track=$tid => $which enabled=${s.track?.enabled}');
-        }
-      } catch (e) {
-        _rlog('[$tag] getSenders 失败: $e');
-      }
-    }
   }
 
   Future<void> _applyScreenTrackToPeer(
@@ -825,7 +796,6 @@ class RTCController {
             RTCSessionDescription(payload['sdp'] as String, 'answer'));
         wrapper.isSettingRemoteAnswerPending = false;
         await _flushPendingIceCandidates(wrapper);
-        await _logAudioSenders('answer后');
         return;
       }
 
@@ -974,7 +944,7 @@ class RTCController {
       }
       _localAudioStream = prewarmed;
       onLocalAudioChanged(prewarmed);
-      _rlog('joinVoice 复用预采集麦克风 轨道=${prewarmed.getAudioTracks().length} device=${_audioTrackDeviceId(prewarmed)}');
+      _rlog('joinVoice 复用预采集麦克风 轨道=${prewarmed.getAudioTracks().length}');
       return prewarmed;
     }
     // 用户没选麦克风时，先挑一个真实设备：Windows 上 ADM 默认 index 0 往往是虚拟声卡，
@@ -1022,23 +992,10 @@ class RTCController {
         'audio': _audioConstraints(),
         'video': false,
       });
-      _rlog('primeAudioDevices 采集到 device=${_audioTrackDeviceId(stream)}');
       await _stopTrackGroup(stream);
       _rlog('primeAudioDevices 完成（已初始化音频设备列表，选device=${_audioInputDeviceId ?? "默认"}）');
     } catch (e) {
       _rlog('primeAudioDevices 失败: $e');
-    }
-  }
-
-  /// 读取采集流实际落在哪个设备（诊断用）。
-  String _audioTrackDeviceId(MediaStream stream) {
-    final track = stream.getAudioTracks().firstOrNull;
-    if (track == null) return 'none';
-    try {
-      final settings = track.getSettings();
-      return (settings['deviceId'] ?? settings.toString()).toString();
-    } catch (_) {
-      return 'unknown';
     }
   }
 
@@ -1093,7 +1050,7 @@ class RTCController {
       await pc1.setRemoteDescription(answer);
       _warmupPc = pc1;
       _warmupPc2 = pc2;
-      _rlog('warmup sender 就绪（本机回环协商，ADM 持续录音）device=${_audioTrackDeviceId(stream)}');
+      _rlog('warmup sender 就绪（本机回环协商，ADM 持续录音）');
     } catch (e) {
       _rlog('warmup sender 失败: $e');
     } finally {
@@ -1174,7 +1131,6 @@ class RTCController {
             'audio': _audioConstraints(),
             'video': false,
           });
-          _rlog('warmup 丢弃首次采集 device=${_audioTrackDeviceId(discard)}');
           await _stopTrackGroup(discard);
           _rlog('warmup 丢弃首次采集完成');
         } catch (e) {
@@ -1196,8 +1152,7 @@ class RTCController {
             track.enabled = _micEnabled;
           }
           _prewarmedAudioStream = stream;
-          _rlog(
-              'warmup 预采集麦克风完成 轨道=${stream.getAudioTracks().length} device=${_audioTrackDeviceId(stream)}');
+          _rlog('warmup 预采集麦克风完成 轨道=${stream.getAudioTracks().length}');
         } catch (e) {
           _rlog('warmup 预采集麦克风失败: $e');
         }

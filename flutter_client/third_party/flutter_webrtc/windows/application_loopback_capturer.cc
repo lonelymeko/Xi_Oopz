@@ -5,24 +5,11 @@
 #include <avrt.h>
 #include <chrono>
 #include <cstring>
-#include <fstream>
 #include <iostream>
 #include <mmdeviceapi.h>
 #include <roapi.h>
 #include <string>
 #include <timeapi.h>
-
-namespace {
-// 诊断日志：插件 DLL 的 stdout/stderr 在 GUI 进程里抓不到，写文件便于排查。
-void MicLog(const std::string& msg) {
-  char buf[MAX_PATH] = {};
-  DWORD n = GetEnvironmentVariableA("TEMP", buf, MAX_PATH);
-  std::string path =
-      std::string(n > 0 ? buf : ".") + "\\oopz_mic_mix.log";
-  std::ofstream f(path, std::ios::app);
-  if (f) f << msg << "\n";
-}
-}  // namespace
 
 // ---------------------------------------------------------------------------
 // ApplicationLoopbackAudio API types
@@ -463,15 +450,12 @@ bool ApplicationLoopbackCapturer::StartMic() {
 
   std::thread worker([&result, done, rate, want_id]() {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    MicLog("StartMic: enter rate=" + std::to_string(rate) +
-           " want_id=" + want_id);
 
     IMMDeviceEnumerator* enumerator = nullptr;
     IMMDevice*           device     = nullptr;
     HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
                                   CLSCTX_ALL, IID_PPV_ARGS(&enumerator));
     if (FAILED(hr)) {
-      MicLog("StartMic: CoCreateInstance failed hr=0x" + std::to_string(hr));
       std::cerr << "[MicCapture] CoCreateInstance failed: 0x" << std::hex << hr
                 << "\n";
       CoUninitialize();
@@ -506,8 +490,6 @@ bool ApplicationLoopbackCapturer::StartMic() {
           if (device) break;
         }
         collection->Release();
-        MicLog(device ? "StartMic: matched selected mic device"
-                      : "StartMic: selected mic not found, fallback default");
       }
     }
 
@@ -517,7 +499,6 @@ bool ApplicationLoopbackCapturer::StartMic() {
         hr = enumerator->GetDefaultAudioEndpoint(eCapture, eConsole, &device);
     }
     if (FAILED(hr) || !device) {
-      MicLog("StartMic: GetDefaultAudioEndpoint failed hr=0x" + std::to_string(hr));
       std::cerr << "[MicCapture] GetDefaultAudioEndpoint failed: 0x" << std::hex
                 << hr << "\n";
       enumerator->Release();
@@ -554,7 +535,6 @@ bool ApplicationLoopbackCapturer::StartMic() {
             AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
         0, 0, &fmt, nullptr);
     if (FAILED(hr)) {
-      MicLog("StartMic: Initialize failed hr=0x" + std::to_string(hr));
       std::cerr << "[MicCapture] Initialize failed: 0x" << std::hex << hr
                 << "\n";
       client->Release();
@@ -619,7 +599,6 @@ bool ApplicationLoopbackCapturer::StartMic() {
   mic_client_         = result.client;
   mic_capture_client_ = result.cap;
   mic_event_          = result.ev;
-  MicLog("StartMic: OK (mono int16 @" + std::to_string(rate) + "Hz)");
   return true;
 }
 
@@ -1002,20 +981,6 @@ void ApplicationLoopbackCapturer::FeederThread() {
         mic_read_frame_ = (mic_read_frame_ + 1) % mic_capacity_frames_;
       }
       mic_frames_avail_ -= n;
-    }
-
-    // 周期性诊断：确认麦克风是否真的在参与混音。
-    {
-      static uint64_t mic_log_tick = 0;
-      if (++mic_log_tick % 300 == 0) {
-        size_t avail = 0;
-        {
-          std::lock_guard<std::mutex> lock(mic_mutex_);
-          avail = mic_frames_avail_;
-        }
-        MicLog("Feeder: mic_ok=" + std::string(mic_ok_ ? "1" : "0") +
-               " mic_avail=" + std::to_string(avail));
-      }
     }
 
     // Confirm whether the feed we're pushing is all-zero (silence).
