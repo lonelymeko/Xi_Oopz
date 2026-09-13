@@ -1,0 +1,5 @@
+# libwebrtc 预编译包由 CMake 在构建时按 libwebrtc_version.ini 下载，不入库
+third_party/downloads/
+third_party/libwebrtc/
+.dart_tool/
+build/

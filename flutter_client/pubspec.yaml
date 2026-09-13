@@ -10,7 +10,11 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flutter_webrtc: ^1.5.2
+  # 本地 fork：为 Windows 端「投屏+系统音频」做原生混音（麦克风+系统音频 → 单条音轨），
+  # 规避上游 flutter_webrtc 在 Windows 上「第二条 audio send stream 会冻结麦克风」的缺陷。
+  # fork 只改了 windows/ 下的原生采集（见 third_party/flutter_webrtc）。
+  flutter_webrtc:
+    path: third_party/flutter_webrtc
   web_socket_channel: ^3.0.1
   http: ^1.2.1
   video_player: ^2.9.2

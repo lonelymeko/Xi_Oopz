@@ -600,12 +600,23 @@ body {
   background: #121212;
 }
 
+/* 非放映室布局改为纵向 flex：上方投屏舞台再高也只会压缩自己（限高，见 .screen-stage__view），
+   下方聊天面板始终保留可用高度，消息列表滚动、输入框钉在底部不会被挤出视口。 */
+.main-panel:not(.main-panel--screening) {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .top-utility-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
   min-height: 52px;
+  flex: 0 0 auto;
 }
 
 .top-utility-bar__left,
@@ -684,6 +695,10 @@ body {
   margin: 0;
   padding: 8px 0 6px;
   border-bottom: 1px solid #232323;
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 58vh;
+  overflow: hidden;
 }
 
 .voice-presence-dock__title {
@@ -772,6 +787,9 @@ body {
   border-radius: 28px;
   /* base.css 里共享态设为 transparent（原为隐藏播放窗下的首字母），这里恢复，否则头像空成一片 */
   color: #051017;
+  /* base.css 共享态设了 stretch，会让首字母跑到左上角；这里还原居中。 */
+  align-items: center;
+  justify-content: center;
 }
 
 /* 共享视频舞台 */
@@ -824,8 +842,8 @@ body {
 
 .voice-orb__share-badge {
   position: absolute;
-  right: -4px;
-  bottom: -4px;
+  right: 4px;
+  bottom: 4px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -859,14 +877,16 @@ body {
 }
 
 .chat-panel {
-  min-height: 0;
+  min-height: 240px;
   padding: 0;
+  flex: 1 1 auto;
 }
 
 .chat-panel__toolbar {
   margin-bottom: 10px;
   padding: 8px 0 14px;
   border-bottom: 1px solid #232323;
+  flex: 0 0 auto;
 }
 
 .chat-panel__title {
@@ -917,6 +937,13 @@ body {
   padding: 0;
   border-radius: 0;
   background: transparent;
+  align-items: flex-start;
+}
+
+/* 头像不参与伸缩：避免消息文本很长（如长链接）时被压扁/拉长。 */
+.message-row > .avatar {
+  flex: 0 0 auto;
+  margin-top: 2px;
 }
 
 .message-row--system {
@@ -946,6 +973,12 @@ body {
   padding-top: 10px;
   border-top: 1px solid #232323;
   background: transparent;
+  flex: 0 0 auto;
+}
+
+/* 成员列表头像同样不伸缩。 */
+.member-row > .avatar {
+  flex: 0 0 auto;
 }
 
 .composer__box {

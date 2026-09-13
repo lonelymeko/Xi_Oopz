@@ -40,6 +40,7 @@ class _HomePageState extends State<HomePage> {
   int? _activeScreeningChannelId; // 已加入的放映室
   DomainPresence _domainPresence = DomainPresence.empty; // 侧边栏各频道成员
   Timer? _presenceDebounce;
+  Timer? _presencePollTimer; // 定时轮询域在场（对齐网页 5s 轮询）
   int? _currentDomainId; // 当前所在域
   List<DomainSummary> _domains = const []; // 可切换的域列表
 
@@ -139,8 +140,16 @@ class _HomePageState extends State<HomePage> {
       final savedSpeaker = await SessionStore.loadSpeakerDeviceId();
       _speakerDeviceId = savedSpeaker;
       unawaited(_rtc!.setAudioOutput(savedSpeaker));
-      // 启动即预热音频（初始化 ADM + 选好真实麦克风/扬声器），避免进房默认设备不生效。
-      unawaited(_rtc!.warmupAudio());
+      // 启动即预热音频（初始化 ADM + 选好 Windows 默认麦克风/扬声器），避免进房默认设备不生效。
+      unawaited(_rtc!.warmupAudio().then((_) {
+        if (!mounted) return;
+        setState(() {
+          _micDeviceId = _rtc!.audioInputDeviceId;
+          _speakerDeviceId = _rtc!.audioOutputDeviceId;
+        });
+        unawaited(_refreshMicLabel());
+        unawaited(_refreshSpeakerLabel());
+      }));
 
       _screening = ScreeningController(
         socket: socket,
@@ -155,6 +164,12 @@ class _HomePageState extends State<HomePage> {
 
       socket.connect();
       _refreshDomainPresence();
+      // 定时轮询域在场（对齐网页端 5s 轮询），避免侧边栏成员/房间状态残留。
+      _presencePollTimer?.cancel();
+      _presencePollTimer = Timer.periodic(
+        const Duration(seconds: 5),
+        (_) => _refreshDomainPresence(),
+      );
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());
     }
@@ -829,6 +844,7 @@ class _HomePageState extends State<HomePage> {
     }
     unawaited(_refreshMicLabel());
     unawaited(_refreshSpeakerLabel());
+    _scheduleDomainPresenceRefresh();
     await _updateKeepAliveNotification();
   }
 
@@ -843,12 +859,15 @@ class _HomePageState extends State<HomePage> {
       _diagnostics = {};
       _screenSharing = false;
     });
+    // 立即刷新侧边栏在场（否则自己退出后频道树头像仍残留，网页是 5s 轮询）。
+    _scheduleDomainPresenceRefresh();
   }
 
   void _joinScreening(ChannelInfo channel) {
     setState(() => _activeScreeningChannelId = channel.id);
     _screening?.join(channel.id);
     unawaited(_syncPipWithScreeningVideo());
+    _scheduleDomainPresenceRefresh();
   }
 
   Future<void> _leaveScreening() async {
@@ -856,6 +875,7 @@ class _HomePageState extends State<HomePage> {
     await _screening?.leave();
     await _disarmPip();
     setState(() => _activeScreeningChannelId = null);
+    _scheduleDomainPresenceRefresh();
   }
 
   ChannelInfo? _channelById(int? channelId) {
@@ -943,6 +963,7 @@ class _HomePageState extends State<HomePage> {
   @override
   void dispose() {
     _presenceDebounce?.cancel();
+    _presencePollTimer?.cancel();
     _floating?.cancelOnLeavePiP();
     BackgroundKeepAlive.stop();
     _rtc?.leaveVoice();

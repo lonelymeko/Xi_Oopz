@@ -1,7 +1,8 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show Platform;
 
+import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import 'background_service.dart';
@@ -121,6 +122,14 @@ class RTCController {
   final Stopwatch _clock = Stopwatch()..start();
 
   MediaStream? _localAudioStream;
+  MediaStream? _prewarmedAudioStream; // 启动预热时采集并保留，进房直接复用（对齐浏览器）
+  // 常驻「暖机」音频发送流：libwebrtc 只在存在活跃 sender 时才开始录音
+  // （AudioState::AddSendingStream），故启动即把麦克风挂到一个空 PC 上，
+  // 让 ADM 持续录音，进频道时就没有冷启动的几秒静音（对齐浏览器的持续采集）。
+  MediaStream? _warmStream;
+  RTCPeerConnection? _warmupPc;
+  RTCPeerConnection? _warmupPc2;
+  bool _warmupStarting = false;
   MediaStream? _localScreenStream;
   String? _audioInputDeviceId; // 选中的麦克风设备 id；null = 系统默认
   String? _audioOutputDeviceId; // 选中的扬声器设备 id；null = ADM 默认
@@ -143,6 +152,14 @@ class RTCController {
   final Set<int> _speakingUsers = {};
   final Map<int, int> _speakingUntil = {}; // 说话高亮保持到期时间
   static const int speakingHoldMs = 1500;
+  int _micSilentStreak = 0; // 连续静音采样数（用于自动重采）
+  int _micRecoverAttempts = 0; // 自动重采次数
+  bool _micKickstarted = false; // 首个 peer 连上后是否已立即重采过
+  // 静音自动重采开关：常驻 warmup sender 已从启动起保持 ADM 录音，冷启动静音问题
+  // 不再需要它；而 outbound audioLevel 在人正常「不说话」时就是 0，会误触发重采并
+  // churn Windows ADM（Stop/StartRecording 已知会残留半初始化、反而录成静音）。
+  // 因此默认关闭，只保留手动切换设备作为恢复手段。
+  final bool _autoMicRecover = false;
 
   RTCController({
     required this.socket,
@@ -240,8 +257,15 @@ class RTCController {
     }
     await _stopTrackGroup(_localAudioStream);
     _localAudioStream = null;
+    await _stopTrackGroup(_prewarmedAudioStream);
+    _prewarmedAudioStream = null;
+    _micSilentStreak = 0;
+    _micRecoverAttempts = 0;
+    _micKickstarted = false;
     _peerEnsureFutures.clear();
     onLocalAudioChanged(null);
+    // 保持暖机发送流常驻，保证下次进频道仍然瞬时出声（麦克风常亮，已确认接受）。
+    unawaited(_startWarmupSender());
   }
 
   Future<void> toggleMic(bool enabled) async {
@@ -251,6 +275,12 @@ class RTCController {
       for (final track in stream.getAudioTracks()) {
         track.enabled = enabled;
       }
+    }
+    // Windows 共享系统音频时发送的是「麦克风+系统音频」混音轨，静音/恢复要同步作用到它，
+    // 否则闭麦后对端仍能听到（注：原生混音里麦与系统音频不可单独静音，闭麦=整条静音）。
+    final mix = _localScreenStream?.getAudioTracks().firstOrNull;
+    if (mix != null) {
+      mix.enabled = enabled;
     }
     final channelId = getCurrentVoiceChannelId();
     if (channelId != null) {
@@ -276,6 +306,11 @@ class RTCController {
     }
     final wantAudio =
         shareAudio && !Platform.isAndroid && !Platform.isIOS;
+    // Windows：把用户选中的麦克风 id 传给原生，用于把麦克风混进共享音频
+    //（默认输入设备可能是虚拟/静音端点）。空 map 也等价 audio:true。
+    final Object audioConstraint = wantAudio
+        ? <String, dynamic>{'micDeviceId': _audioInputDeviceId ?? ''}
+        : false;
     try {
       final sources = await desktopCapturer.getSources(
         types: const [SourceType.Screen, SourceType.Window],
@@ -295,7 +330,7 @@ class RTCController {
             'deviceId': {'exact': chosen.id},
             'mandatory': {'frameRate': 30},
           },
-          'audio': wantAudio,
+          'audio': audioConstraint,
         };
       }
     } catch (e) {
@@ -306,7 +341,7 @@ class RTCController {
         'deviceId': {'exact': '0'},
         'mandatory': {'frameRate': 30},
       },
-      'audio': wantAudio,
+      'audio': audioConstraint,
     };
   }
 
@@ -374,7 +409,7 @@ class RTCController {
       await _teardownLocalScreenStream();
       for (final wrapper in _peers.values.toList(growable: false)) {
         await _applyScreenTrackToPeer(wrapper, null);
-        await _applyDisplayAudioTrackToPeer(wrapper, null);
+        await _applyEffectiveMicTrack(wrapper);
       }
       // 采集/前台服务失败时把前台服务降级回纯语音保活，别把连麦一起带崩。
       await BackgroundKeepAlive.stopScreenShare();
@@ -449,7 +484,7 @@ class RTCController {
       _audioOnlySharing = false;
       await _teardownLocalScreenStream();
       for (final wrapper in _peers.values.toList(growable: false)) {
-        await _applyDisplayAudioTrackToPeer(wrapper, null);
+        await _applyEffectiveMicTrack(wrapper);
       }
       onAudioOnlySharingChanged(false);
       onNotice('error', '共享音频失败', '$e');
@@ -481,29 +516,71 @@ class RTCController {
   Future<void> _renegotiateForScreenShare() async {
     final videoTrack =
         _screenSharing ? _localScreenStream?.getVideoTracks().firstOrNull : null;
-    final displayAudioTrack = (_screenSharing || _audioOnlySharing)
-        ? _localScreenStream?.getAudioTracks().firstOrNull
-        : null;
     for (final wrapper in _peers.values) {
       await _applyScreenTrackToPeer(wrapper, videoTrack);
-      await _applyDisplayAudioTrackToPeer(wrapper, displayAudioTrack);
+      // Windows：共享系统音频时，麦克风 sender 直接换成「麦克风+系统音频」混音轨
+      // （不再用第二条 audio m-line）；停止时换回纯麦克风轨。
+      await _applyEffectiveMicTrack(wrapper);
     }
     for (final wrapper in _peers.values) {
       await _sendOffer(wrapper, force: true);
     }
+    await _logAudioSenders('共享后');
   }
 
-  /// 把屏幕共享音频轨挂到第二条 audio transceiver（displayAudio）上并转 SendRecv；
-  /// [track] 为 null 时摘轨回 RecvOnly。Web 端按第二条 audio 识别为共享音频，协议一致。
-  Future<void> _applyDisplayAudioTrackToPeer(
-      PeerWrapper wrapper, MediaStreamTrack? track) async {
-    await _safeTransceiver('displayAudio.replaceTrack',
-        () => wrapper.displayAudioTransceiver.sender.replaceTrack(track));
+  /// 实际用于「麦克风 sender」的轨道。
+  ///
+  /// Windows 上共享系统音频时，fork 的 getDisplayMedia 返回的音频轨已经是
+  /// 「麦克风 + 系统音频」的原生混音（见 third_party/flutter_webrtc 的
+  /// ApplicationLoopbackCapturer）。这里用它替代纯麦克风，**只发一条 audio
+  /// send stream**，从而规避 Windows 上「ADM 麦克风 + loopback 两条 audio sender
+  /// 共存时麦克风 RTP 被冻结」的上游缺陷 —— 与浏览器 WebAudio 混音同构。
+  MediaStreamTrack? _effectiveMicTrack() {
+    if (Platform.isWindows && (_screenSharing || _audioOnlySharing)) {
+      final mix = _localScreenStream?.getAudioTracks().firstOrNull;
+      if (mix != null) return mix;
+    }
+    return _localAudioStream?.getAudioTracks().firstOrNull;
+  }
+
+  /// 把当前「有效麦克风轨」（共享时=混音轨）重新挂到该 peer 的麦克风 sender。
+  Future<void> _applyEffectiveMicTrack(PeerWrapper wrapper) async {
+    final track = _effectiveMicTrack();
+    await _safeTransceiver('audio.replaceTrack(effectiveMic)',
+        () => wrapper.audioTransceiver.sender.replaceTrack(track));
     await _safeTransceiver(
-        'displayAudio.setDirection',
-        () => wrapper.displayAudioTransceiver.setDirection(track != null
+        'audio.setDirection',
+        () => wrapper.audioTransceiver.setDirection(track != null
             ? TransceiverDirection.SendRecv
             : TransceiverDirection.RecvOnly));
+  }
+
+  /// 诊断：打印每个 peer 上音频 sender 实际挂的轨道，确认共享前后「麦克风轨」没被
+  /// 系统音频轨顶掉/摘掉（排查"投屏+音频覆盖麦克风"）。
+  Future<void> _logAudioSenders(String tag) async {
+    final micId = _localAudioStream?.getAudioTracks().firstOrNull?.id;
+    final dispId = _localScreenStream?.getAudioTracks().firstOrNull?.id;
+    final micDev = _localAudioStream == null
+        ? '-'
+        : _audioTrackDeviceId(_localAudioStream!);
+    _rlog(
+        '[$tag] 音轨 本端mic=$micId(dev=$micDev) display=$dispId screenSharing=$_screenSharing audioOnly=$_audioOnlySharing');
+    for (final wrapper in _peers.values) {
+      try {
+        final senders = await wrapper.pc.getSenders();
+        for (final s in senders) {
+          if (s.track?.kind != 'audio') continue;
+          final tid = s.track?.id;
+          final which = tid == micId
+              ? 'MIC'
+              : (tid == dispId ? 'DISPLAY' : (tid == null ? 'NULL' : 'OTHER'));
+          _rlog(
+              '[$tag] peer=${wrapper.user.id} audio sender track=$tid => $which enabled=${s.track?.enabled}');
+        }
+      } catch (e) {
+        _rlog('[$tag] getSenders 失败: $e');
+      }
+    }
   }
 
   Future<void> _applyScreenTrackToPeer(
@@ -748,6 +825,7 @@ class RTCController {
             RTCSessionDescription(payload['sdp'] as String, 'answer'));
         wrapper.isSettingRemoteAnswerPending = false;
         await _flushPendingIceCandidates(wrapper);
+        await _logAudioSenders('answer后');
         return;
       }
 
@@ -811,6 +889,12 @@ class RTCController {
     'virtual',
   ];
 
+  /// 是否为虚拟/流式设备标签（这些端点通常不出声/不采集）。
+  static bool _isVirtualLabel(String label) {
+    final l = label.toLowerCase();
+    return _virtualAudioHints.any(l.contains) || l.contains('streaming');
+  }
+
   /// 从设备列表里挑一个"看起来真实"的设备（避开虚拟声卡）；没有更优时退回第一个有名字的。
   static MediaDeviceInfo? _pickPreferred(List<MediaDeviceInfo> devices) {
     if (devices.isEmpty) return null;
@@ -826,9 +910,73 @@ class RTCController {
     return devices.first;
   }
 
+  /// 按名称把 Windows 默认设备名匹配到 flutter_webrtc 枚举出的设备。
+  static MediaDeviceInfo? _matchByLabel(
+      List<MediaDeviceInfo> devices, String? name) {
+    if (name == null || name.trim().isEmpty) return null;
+    final target = name.trim().toLowerCase();
+    String core(String s) {
+      final lower = s.toLowerCase().trim();
+      final open = lower.indexOf('(');
+      return open > 0 ? lower.substring(0, open).trim() : lower;
+    }
+
+    for (final d in devices) {
+      final label = d.label.trim().toLowerCase();
+      if (label.isEmpty) continue;
+      if (label == target || label.contains(target) || target.contains(label)) {
+        return d;
+      }
+    }
+    final tcore = core(target);
+    if (tcore.isEmpty) return null;
+    for (final d in devices) {
+      if (d.label.trim().isNotEmpty && core(d.label) == tcore) return d;
+    }
+    return null;
+  }
+
+  /// 按 deviceId 在列表里找设备（用于校验上次保存的选择是否仍存在）。
+  static MediaDeviceInfo? _matchById(
+      List<MediaDeviceInfo> devices, String? id) {
+    if (id == null || id.isEmpty) return null;
+    for (final d in devices) {
+      if (d.deviceId == id) return d;
+    }
+    return null;
+  }
+
+  static const MethodChannel _audioDefaultsChannel =
+      MethodChannel('oopz/audio_defaults');
+
+  /// 读取 Windows「系统默认」录音/播放设备名（平台通道；非 Windows 返回空）。
+  Future<Map<String, String>> _windowsDefaultAudioNames() async {
+    if (!Platform.isWindows) return const {};
+    try {
+      final result = await _audioDefaultsChannel
+          .invokeMapMethod<String, String>('getDefaults');
+      return result ?? const {};
+    } catch (e) {
+      _rlog('读取 Windows 默认音频设备失败: $e');
+      return const {};
+    }
+  }
+
   Future<MediaStream> _ensureAudio() async {
     final existing = _localAudioStream;
     if (existing != null) return existing;
+    // 复用启动预热时采集并保留的麦克风流（对齐浏览器），避免"停掉再重采"。
+    final prewarmed = _prewarmedAudioStream;
+    if (prewarmed != null) {
+      _prewarmedAudioStream = null;
+      for (final track in prewarmed.getAudioTracks()) {
+        track.enabled = _micEnabled;
+      }
+      _localAudioStream = prewarmed;
+      onLocalAudioChanged(prewarmed);
+      _rlog('joinVoice 复用预采集麦克风 轨道=${prewarmed.getAudioTracks().length} device=${_audioTrackDeviceId(prewarmed)}');
+      return prewarmed;
+    }
     // 用户没选麦克风时，先挑一个真实设备：Windows 上 ADM 默认 index 0 往往是虚拟声卡，
     // 直接用默认会采到静音（表现为"别人听不到我"）。
     if (_audioInputDeviceId == null) {
@@ -866,15 +1014,111 @@ class RTCController {
     if (_localAudioStream != null) return;
     if (Platform.isAndroid || Platform.isIOS) return;
     try {
+      // 关键：不要用 `'audio': true`。那会让 GetUserAudio 走 sourceId=="" 分支，
+      // 把 ADM 录音设备钉到 index 0（Windows 上常是虚拟/静音端点）；录制一旦初始化，
+      // 之后 libwebrtc 的 SetRecordingDevice 会因 `_recIsInitialized` 变成 no-op。
+      // 带上已知 sourceId，首次采集就落到正确设备；首次运行尚无选择时才退回默认。
       final stream = await navigator.mediaDevices.getUserMedia({
-        'audio': true,
+        'audio': _audioConstraints(),
         'video': false,
       });
+      _rlog('primeAudioDevices 采集到 device=${_audioTrackDeviceId(stream)}');
       await _stopTrackGroup(stream);
-      _rlog('primeAudioDevices 完成（已初始化音频设备列表）');
+      _rlog('primeAudioDevices 完成（已初始化音频设备列表，选device=${_audioInputDeviceId ?? "默认"}）');
     } catch (e) {
       _rlog('primeAudioDevices 失败: $e');
     }
+  }
+
+  /// 读取采集流实际落在哪个设备（诊断用）。
+  String _audioTrackDeviceId(MediaStream stream) {
+    final track = stream.getAudioTracks().firstOrNull;
+    if (track == null) return 'none';
+    try {
+      final settings = track.getSettings();
+      return (settings['deviceId'] ?? settings.toString()).toString();
+    } catch (_) {
+      return 'unknown';
+    }
+  }
+
+  /// 建立/保持一路常驻的音频发送流（暖机）。
+  ///
+  /// 根因：libwebrtc 的录音只在 `AudioState::AddSendingStream`（即麦克风轨被挂到
+  /// **完成协商的**活跃 sender）才 `StartRecording`。所以光调 `getUserMedia` 或把轨挂到
+  /// 一个「没对端、不协商」的空 PC 都不会开始录音（实测无 REC 日志）。这里用两个
+  /// 本机回环 PeerConnection 互相协商（不出网），让发送流真正 Start，从而 ADM 从启动
+  /// 起就持续录音；进频道把另采集的轨道挂到真实 peer 时录音不中断。
+  Future<void> _startWarmupSender() async {
+    if (Platform.isAndroid || Platform.isIOS) return;
+    if (_warmupPc != null || _warmupStarting) return;
+    if (_localAudioStream != null) return; // 已在通话中，录音本来就在跑
+    _warmupStarting = true;
+    try {
+      var stream = _warmStream;
+      if (stream == null) {
+        stream = await navigator.mediaDevices.getUserMedia({
+          'audio': _audioConstraints(),
+          'video': false,
+        });
+        _warmStream = stream;
+      }
+      final track = stream.getAudioTracks().firstOrNull;
+      if (track == null) {
+        _rlog('warmup sender：没有音频轨道，跳过');
+        return;
+      }
+      track.enabled = true;
+      final config = <String, dynamic>{
+        'iceServers': getIceServers(),
+        'sdpSemantics': 'unified-plan',
+      };
+      final pc1 = await createPeerConnection(config);
+      final pc2 = await createPeerConnection(config);
+      await pc1.addTransceiver(
+        track: track,
+        kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+        init: RTCRtpTransceiverInit(direction: TransceiverDirection.SendRecv),
+      );
+      await pc2.addTransceiver(
+        kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+        init: RTCRtpTransceiverInit(direction: TransceiverDirection.SendRecv),
+      );
+      // 本机互连，交换 SDP 即可让发送流 Start（录音启动），无需 ICE 连通。
+      final offer = await pc1.createOffer();
+      await pc1.setLocalDescription(offer);
+      await pc2.setRemoteDescription(offer);
+      final answer = await pc2.createAnswer();
+      await pc2.setLocalDescription(answer);
+      await pc1.setRemoteDescription(answer);
+      _warmupPc = pc1;
+      _warmupPc2 = pc2;
+      _rlog('warmup sender 就绪（本机回环协商，ADM 持续录音）device=${_audioTrackDeviceId(stream)}');
+    } catch (e) {
+      _rlog('warmup sender 失败: $e');
+    } finally {
+      _warmupStarting = false;
+    }
+  }
+
+  /// 停掉暖机发送流 + 释放那路采集（切设备/彻底停止时需要，让 ADM 能重新初始化录音设备）。
+  Future<void> _stopWarmupSender() async {
+    final pc = _warmupPc;
+    final pc2 = _warmupPc2;
+    _warmupPc = null;
+    _warmupPc2 = null;
+    for (final conn in [pc, pc2]) {
+      if (conn == null) continue;
+      try {
+        await conn.close();
+      } catch (_) {}
+      try {
+        await conn.dispose();
+      } catch (_) {}
+    }
+    final stream = _warmStream;
+    _warmStream = null;
+    await _stopTrackGroup(stream);
   }
 
   /// 启动时就预热音频（对齐浏览器）：初始化 ADM、枚举并选定真实麦克风/扬声器。
@@ -884,28 +1128,83 @@ class RTCController {
     if (Platform.isAndroid || Platform.isIOS) return;
     try {
       await primeAudioDevices(); // 触发 ADM 初始化，设备列表才可用
-      if (_audioInputDeviceId == null) {
-        final inputs = await listAudioInputs();
-        final preferred = _pickPreferred(inputs);
-        if (preferred != null) {
-          _audioInputDeviceId = preferred.deviceId;
+      final defaults = await _windowsDefaultAudioNames();
+      _rlog('Windows 默认设备: input=${defaults['input']} output=${defaults['output']}');
+
+      // 麦克风：上次保存的选择优先（并校验仍在），没有才用系统默认（虚拟则跳过）→ 启发式。
+      final inputs = await listAudioInputs();
+      _rlog('warmup 候选麦克风: ${inputs.map((d) => "${d.label}=${d.deviceId}").join(" | ")}');
+      var inputPick = _matchById(inputs, _audioInputDeviceId);
+      if (inputPick == null) {
+        final winDefault = _matchByLabel(inputs, defaults['input']);
+        inputPick = (winDefault != null && !_isVirtualLabel(winDefault.label))
+            ? winDefault
+            : _pickPreferred(inputs);
+      }
+      if (inputPick != null) {
+        _audioInputDeviceId = inputPick.deviceId;
+        try {
+          await Helper.selectAudioInput(inputPick.deviceId);
+        } catch (_) {}
+        _rlog('warmup 选麦克风 -> ${inputPick.label} id=${inputPick.deviceId}');
+      }
+
+      // 扬声器：同理。
+      final outputs = await listAudioOutputs();
+      var outputPick = _matchById(outputs, _audioOutputDeviceId);
+      if (outputPick == null) {
+        final winDefault = _matchByLabel(outputs, defaults['output']);
+        outputPick = (winDefault != null && !_isVirtualLabel(winDefault.label))
+            ? winDefault
+            : _pickPreferred(outputs);
+      }
+      if (outputPick != null) {
+        _audioOutputDeviceId = outputPick.deviceId;
+        try {
+          await Helper.selectAudioOutput(outputPick.deviceId);
+        } catch (_) {}
+        _rlog('warmup 选扬声器 -> ${outputPick.label}');
+      }
+
+      // Windows 上首次带设备采集可能仍走旧/虚拟设备（静音），先采集一次丢弃，
+      // 再采集一次并**保留**（对齐浏览器 prewarmedAudioStream），进房直接复用。
+      if (_prewarmedAudioStream == null && _localAudioStream == null) {
+        try {
+          final discard = await navigator.mediaDevices.getUserMedia({
+            'audio': _audioConstraints(),
+            'video': false,
+          });
+          _rlog('warmup 丢弃首次采集 device=${_audioTrackDeviceId(discard)}');
+          await _stopTrackGroup(discard);
+          _rlog('warmup 丢弃首次采集完成');
+        } catch (e) {
+          _rlog('warmup 丢弃首次采集失败（忽略）: $e');
+        }
+        // 停掉后录制已释放，此时重新显式下发设备选择才真正生效（先停后选）。
+        if (inputPick != null) {
           try {
-            await Helper.selectAudioInput(preferred.deviceId);
+            await Helper.selectAudioInput(inputPick.deviceId);
           } catch (_) {}
-          _rlog('warmup 选麦克风 -> ${preferred.label}');
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        try {
+          final stream = await navigator.mediaDevices.getUserMedia({
+            'audio': _audioConstraints(),
+            'video': false,
+          });
+          for (final track in stream.getAudioTracks()) {
+            track.enabled = _micEnabled;
+          }
+          _prewarmedAudioStream = stream;
+          _rlog(
+              'warmup 预采集麦克风完成 轨道=${stream.getAudioTracks().length} device=${_audioTrackDeviceId(stream)}');
+        } catch (e) {
+          _rlog('warmup 预采集麦克风失败: $e');
         }
       }
-      if (_audioOutputDeviceId == null) {
-        final outputs = await listAudioOutputs();
-        final preferred = _pickPreferred(outputs);
-        if (preferred != null) {
-          _audioOutputDeviceId = preferred.deviceId;
-          try {
-            await Helper.selectAudioOutput(preferred.deviceId);
-          } catch (_) {}
-          _rlog('warmup 选扬声器 -> ${preferred.label}');
-        }
-      }
+
+      // 设备已选好，立刻建立常驻暖机发送流，让 ADM 从启动起就持续录音。
+      await _startWarmupSender();
     } catch (e) {
       _rlog('warmupAudio 失败: $e');
     }
@@ -959,9 +1258,47 @@ class RTCController {
     final next = (deviceId == null || deviceId.isEmpty) ? null : deviceId;
     if (_audioInputDeviceId == next) return;
     _audioInputDeviceId = next;
-    if (!_voiceSessionActive) return;
 
+    // 切设备前先停掉暖机发送流：只要还有 sender 在发，ADM 就认为录音已初始化，
+    // `SetRecordingDevice` 会 no-op，设备永远切不过去。
+    await _stopWarmupSender();
+
+    // 设备变了：丢弃旧的预热流。
+    final prewarmed = _prewarmedAudioStream;
+    _prewarmedAudioStream = null;
+    await _stopTrackGroup(prewarmed);
+
+    if (!_voiceSessionActive) {
+      // 未连麦：直接用新设备重新预采集，进房复用。
+      try {
+        final stream = await navigator.mediaDevices.getUserMedia({
+          'audio': _audioConstraints(),
+          'video': false,
+        });
+        for (final track in stream.getAudioTracks()) {
+          track.enabled = _micEnabled;
+        }
+        _prewarmedAudioStream = stream;
+        _rlog('setMicrophone 预采集完成 -> ${_audioInputDeviceId ?? "默认"}');
+      } catch (e) {
+        _rlog('setMicrophone 预采集失败: $e');
+      }
+      await _startWarmupSender();
+      return;
+    }
+
+    // Windows ADM：只要还有麦克风流存活，libwebrtc 的 SetRecordingDevice 会被
+    // `if (_recIsInitialized) return -1` 挡掉，换设备会静默失效。故**先彻底停掉旧流**
+    // （释放录制），再重新采集，新 sourceId 才真正生效。
     final old = _localAudioStream;
+    _localAudioStream = null;
+    if (old != null) {
+      for (final wrapper in _peers.values) {
+        await _safeTransceiver('audio.replaceTrack(switchMic-clear)',
+            () => wrapper.audioTransceiver.sender.replaceTrack(null));
+      }
+      await _stopTrackGroup(old);
+    }
     try {
       final stream = await navigator.mediaDevices.getUserMedia({
         'audio': _audioConstraints(),
@@ -977,14 +1314,51 @@ class RTCController {
       _localAudioStream = stream;
       onLocalAudioChanged(stream);
       for (final wrapper in _peers.values) {
-        await _safeTransceiver('audio.replaceTrack(switchMic)',
-            () => wrapper.audioTransceiver.sender.replaceTrack(newTrack));
+        await _applyEffectiveMicTrack(wrapper);
       }
-      if (old != null) await _stopTrackGroup(old);
-      _rlog('setMicrophone -> ${_audioInputDeviceId ?? "默认"}');
+      _rlog('setMicrophone -> ${_audioInputDeviceId ?? "默认"}（先停旧流后重采）');
     } catch (e) {
       _rlog('setMicrophone 失败: $e');
       onNotice('error', '切换麦克风失败', '$e');
+    }
+    await _startWarmupSender();
+  }
+
+  /// 自动重新采集麦克风（Windows 首次采集偶发静音时的兜底，等价于手动切换一次设备）。
+  Future<void> _reacquireMic() async {
+    if (!_voiceSessionActive) return;
+    // 先停暖机流，让 ADM 彻底停录，设备切换/重采才会真正生效。
+    await _stopWarmupSender();
+    // Windows ADM：旧流还活着时 SetRecordingDevice 会被 `_recIsInitialized` 挡掉，
+    // 所以必须**先停旧流 + 摘掉 sender 上的旧轨**，再重新采集，sourceId 才生效。
+    final old = _localAudioStream;
+    _localAudioStream = null;
+    if (old != null) {
+      for (final wrapper in _peers.values) {
+        await _safeTransceiver('audio.replaceTrack(reacquire-clear)',
+            () => wrapper.audioTransceiver.sender.replaceTrack(null));
+      }
+      await _stopTrackGroup(old);
+    }
+    try {
+      final stream = await navigator.mediaDevices.getUserMedia({
+        'audio': _audioConstraints(),
+        'video': false,
+      });
+      final newTrack = stream.getAudioTracks().firstOrNull;
+      if (newTrack == null) {
+        await _stopTrackGroup(stream);
+        return;
+      }
+      newTrack.enabled = _micEnabled;
+      _localAudioStream = stream;
+      onLocalAudioChanged(stream);
+      for (final wrapper in _peers.values) {
+        await _applyEffectiveMicTrack(wrapper);
+      }
+      _rlog('重新采集麦克风完成（先停旧流后重采，device=${_audioInputDeviceId ?? "默认"}）');
+    } catch (e) {
+      _rlog('重新采集麦克风失败: $e');
     }
   }
 
@@ -1015,7 +1389,8 @@ class RTCController {
 
   Future<void> _bindLocalTracks(PeerWrapper wrapper,
       {bool forceReplace = false}) async {
-    final audioTrack = _localAudioStream?.getAudioTracks().firstOrNull;
+    // Windows 共享系统音频时用「麦克风+系统音频」混音轨，否则用纯麦克风轨。
+    final audioTrack = _effectiveMicTrack();
     _rlog(
         '_bindLocalTracks peer=${wrapper.user.id} audioTrack=${audioTrack != null} forceReplace=$forceReplace');
 
@@ -1036,18 +1411,13 @@ class RTCController {
             ? TransceiverDirection.SendRecv
             : TransceiverDirection.RecvOnly));
 
-    // 屏幕共享音频：桌面端（Windows loopback）在共享时挂本地屏幕音频轨并 SendRecv；
-    // 移动端没有屏幕音频，保持 recvonly。重连/重协商后同样要重挂。
-    final displayAudioTrack = (_screenSharing || _audioOnlySharing)
-        ? _localScreenStream?.getAudioTracks().firstOrNull
-        : null;
+    // 屏幕共享音频：Windows 上已并入上面的麦克风 sender（单条 send stream），
+    // 这里保持 displayAudio 为 recvonly（仅用于接收他人可能发来的第二条音轨）。
     await _safeTransceiver('displayAudio.replaceTrack',
-        () => wrapper.displayAudioTransceiver.sender.replaceTrack(displayAudioTrack));
-    await _safeTransceiver(
-        'displayAudio.setDirection',
-        () => wrapper.displayAudioTransceiver.setDirection(displayAudioTrack != null
-            ? TransceiverDirection.SendRecv
-            : TransceiverDirection.RecvOnly));
+        () => wrapper.displayAudioTransceiver.sender.replaceTrack(null));
+    await _safeTransceiver('displayAudio.setDirection',
+        () => wrapper.displayAudioTransceiver
+            .setDirection(TransceiverDirection.RecvOnly));
 
     // 屏幕视频：正在共享时挂本地屏幕轨并转 SendRecv，否则摘轨回 RecvOnly。
     // 重连/重协商后必须重新挂一遍，否则共享者断线重连后观众就再也看不到画面。
@@ -1181,7 +1551,7 @@ class RTCController {
     // 麦克风 transceiver：建时直接挂轨道 + SendRecv 一步到位。
     // macOS flutter_webrtc 上「先建 RecvOnly 空轨、再 setDirection(SendRecv)」
     // 不能可靠开启发送（getStats 无 outbound-rtp audio），必须建时带轨道。
-    final micTrack = _localAudioStream?.getAudioTracks().firstOrNull;
+    final micTrack = _effectiveMicTrack();
     _rlog('_createPeer peer=${user.id} micTrack=${micTrack != null}');
     final audioTransceiver = micTrack != null
         ? await pc.addTransceiver(
@@ -1221,6 +1591,18 @@ class RTCController {
     // 让后续 _refreshLocalOutboundForNegotiation 全部跳过（避免失效的 setDirection）。
     if (_isDesktop && micTrack != null) {
       wrapper.tracksBound = true;
+    }
+
+    // 关键：若本端**已经在共享**（观众中途进频道/重进），新 peer 的 screen/displayAudio
+    // transceiver 建出来是 RecvOnly 空轨；而上面已把 tracksBound 置真，后续重绑会被跳过，
+    // 于是这个新 peer 永远拿不到共享画面/音频。这里在协商前主动补挂一次。
+    if (_screenSharing || _audioOnlySharing) {
+      final shareStream = _localScreenStream;
+      final videoTrack =
+          _screenSharing ? shareStream?.getVideoTracks().firstOrNull : null;
+      _rlog(
+          '_createPeer peer=${user.id} 已在共享，补挂 screen=${videoTrack != null}（麦克风 sender 已是混音轨）');
+      await _applyScreenTrackToPeer(wrapper, videoTrack);
     }
 
     pc.onIceCandidate = (RTCIceCandidate candidate) {
@@ -1395,6 +1777,12 @@ class RTCController {
     _clearPeerDisconnectTimer(wrapper.user.id);
     _scheduleStableReset(wrapper);
     _startPeerStats(wrapper);
+    // 首个 peer 连上后立即重采一次麦克风：Windows 首次采集偶发静音，
+    // 尽早恢复（不等电平检测的几秒）。
+    if (_autoMicRecover && !_micKickstarted) {
+      _micKickstarted = true;
+      unawaited(_reacquireMic());
+    }
     // sender.parameters 里的 encodings 是原生侧在 sender 创建时给的快照，
     // 协商完成前可能还是空的，这里连上后补设一次屏幕共享的发送上限。
     if (_screenSharing) {
@@ -1844,20 +2232,22 @@ class RTCController {
   Future<void> _collectPeerStats(PeerWrapper wrapper) async {
     try {
       final stats = await wrapper.pc.getStats();
-      // 出站音频诊断：确认麦克风 RTP 是否真的在发包（排查单向无声）
+      // 出站麦克风电平（media-source audioLevel，用于「正在说话」）。
       double localMicLevel = 0;
       for (final report in stats) {
-        if (report.type == 'outbound-rtp' && report.values['kind'] == 'audio') {
-          _rlog(
-              '出站音频 peer=${wrapper.user.id} bytesSent=${report.values['bytesSent']} packetsSent=${report.values['packetsSent']}');
-        }
         if (report.type == 'media-source' && report.values['kind'] == 'audio') {
           final lv = report.values['audioLevel'];
           if (lv is num && lv.toDouble() > localMicLevel) {
             localMicLevel = lv.toDouble();
           }
+        }
+      }
+      // 出站音频诊断：只用批量 stats。切勿用 RTCRtpSender.getStats()——Windows 上
+      // 会直接让 libwebrtc 崩溃（0xc0000409），实测进房即闪退。
+      for (final report in stats) {
+        if (report.type == 'outbound-rtp' && report.values['kind'] == 'audio') {
           _rlog(
-              '麦克风源 peer=${wrapper.user.id} audioLevel=${report.values['audioLevel']}');
+              '出站音频 peer=${wrapper.user.id} bytesSent=${report.values['bytesSent']} packetsSent=${report.values['packetsSent']}');
         }
       }
       // 入站音频活动检测：用于放映室/成员列表「正在说话」高亮。
@@ -1903,6 +2293,21 @@ class RTCController {
             _speakingUntil.remove(selfId);
           }
           onSpeakingChanged(Set.of(_speakingUsers));
+        }
+      }
+      // Windows 上首次采集可能录到静音（手动切换一次设备才恢复）。自动兜底：
+      // 连续多个采样周期电平≈0 且还没重采过，就自动重新采集麦克风（等价于手动切换）。
+      if (_voiceSessionActive && _micEnabled && _autoMicRecover) {
+        if (localMicLevel > 0.005) {
+          _micSilentStreak = 0;
+        } else {
+          _micSilentStreak++;
+          if (_micSilentStreak >= 2 && _micRecoverAttempts < 3) {
+            _micSilentStreak = 0;
+            _micRecoverAttempts++;
+            _rlog('麦克风连续静音，自动重新采集（第 $_micRecoverAttempts 次）');
+            unawaited(_reacquireMic());
+          }
         }
       }
       final reports = <String, StatsReport>{};
