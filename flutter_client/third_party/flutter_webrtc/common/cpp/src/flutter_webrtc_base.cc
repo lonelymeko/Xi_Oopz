@@ -264,47 +264,62 @@ scoped_refptr<RTCMediaConstraints> FlutterWebRTCBase::ParseMediaConstraints(
 
 bool FlutterWebRTCBase::CreateIceServers(const EncodableList& iceServersArray,
                                          IceServer* ice_servers) {
-  size_t size = iceServersArray.size();
-  for (size_t i = 0; i < size; i++) {
-    IceServer& ice_server = ice_servers[i];
+  // 注意：libwebrtc 的 IceServer 只有一个 `uri`。旧实现把同一项里的多个 `urls`
+  // 循环覆盖到同一个 IceServer 上，结果 **只剩最后一个 url**（浏览器会把 udp/tcp
+  // 两条都拿来用）。这里把多个 url 展开成多条 IceServer（最多 kMaxIceServerSize 条），
+  // 与浏览器行为对齐，避免「只剩一条不通的 transport 导致连不上」。
+  size_t out = 0;
+  for (size_t i = 0; i < iceServersArray.size(); i++) {
+    if (out >= kMaxIceServerSize) break;
     EncodableMap iceServerMap = GetValue<EncodableMap>(iceServersArray[i]);
 
-    if (iceServerMap.find(EncodableValue("username")) != iceServerMap.end()) {
-      ice_server.username = GetValue<std::string>(
-          iceServerMap.find(EncodableValue("username"))->second);
+    std::string username;
+    std::string password;
+    auto username_it = iceServerMap.find(EncodableValue("username"));
+    if (username_it != iceServerMap.end() &&
+        TypeIs<std::string>(username_it->second)) {
+      username = GetValue<std::string>(username_it->second);
     }
-    if (iceServerMap.find(EncodableValue("credential")) != iceServerMap.end()) {
-      ice_server.password = GetValue<std::string>(
-          iceServerMap.find(EncodableValue("credential"))->second);
+    auto credential_it = iceServerMap.find(EncodableValue("credential"));
+    if (credential_it != iceServerMap.end() &&
+        TypeIs<std::string>(credential_it->second)) {
+      password = GetValue<std::string>(credential_it->second);
     }
 
+    std::vector<std::string> uris;
     auto it = iceServerMap.find(EncodableValue("url"));
     if (it != iceServerMap.end() && TypeIs<std::string>(it->second)) {
-      ice_server.uri = GetValue<std::string>(it->second);
+      uris.push_back(GetValue<std::string>(it->second));
     }
     it = iceServerMap.find(EncodableValue("urls"));
     if (it != iceServerMap.end()) {
       if (TypeIs<std::string>(it->second)) {
-        ice_server.uri = GetValue<std::string>(it->second);
-      }
-      if (TypeIs<EncodableList>(it->second)) {
+        uris.push_back(GetValue<std::string>(it->second));
+      } else if (TypeIs<EncodableList>(it->second)) {
         const EncodableList urls = GetValue<EncodableList>(it->second);
         for (auto url : urls) {
           if (TypeIs<EncodableMap>(url)) {
             const EncodableMap map = GetValue<EncodableMap>(url);
-            std::string value;
             auto it2 = map.find(EncodableValue("url"));
-            if (it2 != map.end()) {
-              ice_server.uri = GetValue<std::string>(it2->second);
+            if (it2 != map.end() && TypeIs<std::string>(it2->second)) {
+              uris.push_back(GetValue<std::string>(it2->second));
             }
           } else if (TypeIs<std::string>(url)) {
-            ice_server.uri = GetValue<std::string>(url);
+            uris.push_back(GetValue<std::string>(url));
           }
         }
       }
     }
+
+    for (const auto& uri : uris) {
+      if (out >= kMaxIceServerSize) break;
+      IceServer& ice_server = ice_servers[out++];
+      ice_server.uri = uri;
+      ice_server.username = username;
+      ice_server.password = password;
+    }
   }
-  return size > 0;
+  return out > 0;
 }
 
 bool FlutterWebRTCBase::ParseRTCConfiguration(const EncodableMap& map,

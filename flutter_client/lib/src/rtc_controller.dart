@@ -1026,8 +1026,11 @@ class RTCController {
         return;
       }
       track.enabled = true;
+      // 暖机 PC 只在本机回环交换 SDP（让 ADM 开始录音），**不需要任何 ICE**。
+      // 这里刻意传空 iceServers：否则它会去 STUN/TURN 做 allocate，长期保活会白占
+      // 每个客户端的 TURN 分配额度，可能拖垮真正通话的中继建立（Windows↔Windows 双方都占）。
       final config = <String, dynamic>{
-        'iceServers': getIceServers(),
+        'iceServers': const <Map<String, dynamic>>[],
         'sdpSemantics': 'unified-plan',
       };
       final pc1 = await createPeerConnection(config);
@@ -1492,10 +1495,11 @@ class RTCController {
       throw StateError('missing current user');
     }
 
+    final iceServers = relayOnly ? _relayIceServers() : getIceServers();
     _rlog(
-        '_createPeer peer=${user.id} iceServers数=${(relayOnly ? _relayIceServers() : getIceServers()).length} 开始建 pc');
+        '_createPeer peer=${user.id} relayOnly=$relayOnly iceServers=${iceServers.map((s) => s['urls'] ?? s['url']).toList()} 开始建 pc');
     final pc = await createPeerConnection({
-      'iceServers': relayOnly ? _relayIceServers() : getIceServers(),
+      'iceServers': iceServers,
       'sdpSemantics': 'unified-plan',
       'bundlePolicy': 'max-bundle',
       'rtcpMuxPolicy': 'require',
