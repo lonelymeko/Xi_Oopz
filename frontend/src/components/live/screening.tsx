@@ -756,14 +756,14 @@ export function ScreeningRoomPanel({
                 </button>
               </div>
             </div>
-          ) : (
+          ) : playbackUrl ? (
             <media-player
               ref={(node: HTMLElement | null) => {
                 playerRef.current = node as ScreeningPlayerElement | null;
               }}
               class="screening-stage__player"
               aspect-ratio="16/9"
-              src={playbackUrl || undefined}
+              src={playbackUrl}
               title={state?.currentTitle || channel.name}
               viewType="video"
               streamType={isLiveScreening ? "live" : "on-demand"}
@@ -775,7 +775,7 @@ export function ScreeningRoomPanel({
               <media-outlet></media-outlet>
               <media-community-skin></media-community-skin>
             </media-player>
-          )}
+          ) : null}
           {joined && state?.currentUrl && !isImageSequence ? (
             <button
               type="button"

@@ -2,6 +2,7 @@ import { useState, type RefObject } from "react";
 
 import { MemberSection, RemoteAudioLayer, ScreenStage, VoiceAvatarOrb } from "./voiceAndMember";
 import { ScreeningPlaylistSection, ScreeningRoomPanel } from "./screening";
+import { ErrorBoundary } from "./ErrorBoundary";
 import {
   AudioShareIcon,
   ChatIcon,
@@ -172,6 +173,7 @@ export function LiveMainPanel(props: {
 
   return (
     <>
+      <ErrorBoundary>
       <main className={`main-panel ${activeScreeningChannel ? "main-panel--screening" : ""}`}>
         <RemoteAudioLayer remoteMedia={remoteMedia} selfUserId={user?.id || 0} deafened={deafened} remoteVolume={remoteVolume} />
         <div className="top-utility-bar">
@@ -404,6 +406,7 @@ export function LiveMainPanel(props: {
           </form>
         </section>
       </main>
+      </ErrorBoundary>
 
       <aside className="member-sidebar">
         <div className="member-sidebar__header">
