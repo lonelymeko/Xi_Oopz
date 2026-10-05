@@ -23,6 +23,7 @@ const (
 	mediaProxyTimeout       = 30 * time.Second
 	mediaProxyManifestLimit = 8 << 20
 	mediaProxyMaxRedirects  = 5
+	mediaProxyKeyLimit      = 4 << 10
 	mediaProxyUserAgent     = "Mozilla/5.0 (compatible; OOPZ-MediaProxy/1.0)"
 )
 
@@ -88,9 +89,39 @@ func (h *Handler) ProxyMedia(c *gin.Context) {
 		return
 	}
 
+	if proxyKey && resp.StatusCode == http.StatusOK {
+		key, err := io.ReadAll(io.LimitReader(resp.Body, mediaProxyKeyLimit))
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read media key"})
+			return
+		}
+		key = normalizeAES128Key(key)
+		c.Header("Content-Type", "application/octet-stream")
+		c.Header("Cache-Control", "no-store")
+		c.Header("Content-Length", fmt.Sprintf("%d", len(key)))
+		c.Status(http.StatusOK)
+		_, _ = c.Writer.Write(key)
+		return
+	}
+
 	copyMediaProxyResponseHeaders(c.Writer.Header(), resp.Header, target, contentType)
 	c.Status(resp.StatusCode)
 	_, _ = io.Copy(c.Writer, resp.Body)
+}
+
+// AES-128 密钥必须是 16 字节。部分源站的 .key 文件写的是 32 位十六进制文本，
+// 实际加密用的是这段文本的前 16 个字符；原样下发会被播放器当成 AES-256 解出乱码。
+func normalizeAES128Key(key []byte) []byte {
+	if len(key) != 32 {
+		return key
+	}
+	for _, b := range key {
+		isHex := (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
+		if !isHex {
+			return key
+		}
+	}
+	return key[:16]
 }
 
 // 从目标 URL 路径推导下载文件名，取不出可用名时兜底 media。

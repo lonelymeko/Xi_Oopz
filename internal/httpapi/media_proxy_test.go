@@ -156,3 +156,18 @@ func TestMediaDownloadFilename(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeAES128Key(t *testing.T) {
+	raw16 := []byte{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f}
+	if got := normalizeAES128Key(raw16); string(got) != string(raw16) {
+		t.Fatalf("16-byte key should pass through, got %x", got)
+	}
+	hexText := []byte("6a7f573dd0ec9e2d878291c836f0c151")
+	if got := normalizeAES128Key(hexText); string(got) != "6a7f573dd0ec9e2d" {
+		t.Fatalf("32-char hex text should be cut to its first 16 chars, got %q", got)
+	}
+	binary32 := append(append([]byte{}, raw16...), raw16...)
+	if got := normalizeAES128Key(binary32); len(got) != 32 {
+		t.Fatalf("32-byte binary key should pass through, got %d bytes", len(got))
+	}
+}

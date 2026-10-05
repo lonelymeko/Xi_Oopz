@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { assembleHLSDownload } from "../src/components/live/screening";
@@ -6,7 +7,7 @@ function textResponse(body: string, url = "") {
   return { ok: true, status: 200, url, text: async () => body } as Response;
 }
 
-/** jsdom 的 Blob 缺 arrayBuffer()，用可检查内部分片的替身验证拼接顺序。 */
+/** 测试环境的 Blob 不便读回内容，用可检查内部分片的替身验证拼接顺序。 */
 class InspectableBlob {
   readonly parts: ArrayBuffer[];
   readonly type: string;
@@ -114,6 +115,42 @@ describe("assembleHLSDownload", () => {
     expect(result.url).toContain(encodeURIComponent("https://cdn.example.com/vod/index.m3u8"));
     // 只探测清单（主清单 + 变体），一个分片都没拉
     expect(fetchMock.mock.calls.length).toBe(2);
+  });
+
+  it("AES-128 加密分片应解密后再保存，32 位十六进制文本密钥取前 16 个字符", async () => {
+    const keyText = "6a7f573dd0ec9e2d878291c836f0c151";
+    const plain = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
+    const cryptoKey = await crypto.subtle.importKey("raw", new TextEncoder().encode(keyText.slice(0, 16)), { name: "AES-CBC" }, false, [
+      "encrypt",
+    ]);
+    // 清单未给 IV 时用媒体序号：首片序号 7
+    const iv = new Uint8Array(16);
+    iv[15] = 7;
+    const cipher = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-CBC", iv }, cryptoKey, plain));
+    const manifest = [
+      "#EXTM3U",
+      "#EXT-X-MEDIA-SEQUENCE:7",
+      '#EXT-X-KEY:METHOD=AES-128,URI="enc.key"',
+      "#EXTINF:4,",
+      "seg1.ts",
+      "#EXT-X-ENDLIST",
+    ].join("\n");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("index.m3u8")) return textResponse(manifest, url);
+      if (url.endsWith("/vod/enc.key")) return binaryResponse(Array.from(new TextEncoder().encode(keyText)));
+      if (url.endsWith("/vod/seg1.ts")) return binaryResponse(Array.from(cipher));
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("Blob", InspectableBlob);
+
+    const result = await assembleHLSDownload("https://cdn.example.com/vod/index.m3u8", new AbortController().signal, () => {});
+
+    // 不是真 TS，转封装不可用，按解密后的明文原样保存
+    expect(result.mode).toBe("blob");
+    if (result.mode !== "blob") return;
+    expect((result.blob as unknown as InspectableBlob).concatenated()).toEqual(plain);
   });
 
   it("无 EXT-X-ENDLIST 的直播流应拒绝下载", async () => {
