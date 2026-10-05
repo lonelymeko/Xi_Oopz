@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { DownloadIcon, ExpandIcon, PauseIcon, PlayIcon, PlaylistAddIcon, PlaylistIcon, TrashIcon } from "./icons";
+import { DownloadIcon, ExpandIcon, PauseIcon, PlayIcon, PlaylistAddIcon, PlaylistIcon, SkipNextIcon, TrashIcon } from "./icons";
 import { buildApiUrl } from "../../config/runtime";
 import type { ScreeningPlaylistItem, ScreeningSnapshot, User, Channel } from "../../types";
 import {
@@ -83,7 +83,6 @@ export function ScreeningRoomPanel({
   const tickTimerRef = useRef<number | null>(null);
   const imageTickTimerRef = useRef<number | null>(null);
   const lastLoadedItemRef = useRef<string>("");
-  const canPlayUrlRef = useRef("");
   const lastAppliedJoinEpochRef = useRef(-1);
   const previousControllerRef = useRef(false);
   // Monotonic playback-sync anchor: project the controller's position using the viewer's
@@ -411,14 +410,16 @@ export function ScreeningRoomPanel({
     };
     const handleCanPlay = () => {
       logPlayerEvent("can-play");
-      canPlayUrlRef.current = player.src || "";
       reportControllerReady();
     };
     // 播放器可能在房间进入“等待就绪”之前就已加载好同一地址（加载够快，或对正在放的地址重新发起放映），
-    // 此时不会再有 can-play 事件，需要按已就绪状态补报，否则房间一直停在 loading。
-    if (canPlayUrlRef.current && canPlayUrlRef.current === playbackUrl) {
-      reportControllerReady();
-    }
+    // 此时不会再有 can-play 事件，需要按播放器的真实就绪状态补报，否则房间一直停在 loading。
+    // 稍等一下再看：刚换源时播放器的就绪标记还没来得及复位，立即判断会把旧源的就绪当成新源的。
+    const readyCheckTimer = window.setTimeout(() => {
+      if (player.state?.canPlay && player.src === playbackUrl) {
+        reportControllerReady();
+      }
+    }, 400);
     const handlePlay = () => {
       logPlayerEvent("play");
       if (!isController || !state?.currentItemId) return;
@@ -523,6 +524,7 @@ export function ScreeningRoomPanel({
     player.addEventListener("error", handleError);
 
     return () => {
+      window.clearTimeout(readyCheckTimer);
       player.removeEventListener("can-play", handleCanPlay);
       player.removeEventListener("can-play-through", handleCanPlayThrough);
       player.removeEventListener("loaded-metadata", handleLoadedMetadata);
@@ -674,6 +676,18 @@ export function ScreeningRoomPanel({
     }
   }
 
+  const canSkipToNext = isController && Boolean(state?.currentItemId) && (snapshot?.playlist.length || 0) > 0;
+
+  /** 主动切到播放列表的下一个视频：复用“当前播完”的推进逻辑，由服务端取出下一条并广播。 */
+  function handleSkipToNext() {
+    if (!canSkipToNext || !state?.currentItemId) return;
+    onPlaybackEvent("screening.item.ended", {
+      itemId: state.currentItemId,
+      currentTime: 0,
+      playbackRate: state.playbackRate || 1,
+    });
+  }
+
   async function prepareSubmissionInput() {
     const url = urlInput.trim();
     if (!url) {
@@ -817,15 +831,13 @@ export function ScreeningRoomPanel({
 
       {joined ? (
         <div className="screening-composer">
-          <div className="screening-composer__inputs">
-            <input
-              value={urlInput}
-              onChange={(event) => onUrlInputChange(event.target.value)}
-              placeholder="视频直链或视频网页地址（网页会自动解析）"
-            />
-            <input value={titleInput} onChange={(event) => onTitleInputChange(event.target.value)} placeholder="可选标题" />
-          </div>
+          <input
+            value={urlInput}
+            onChange={(event) => onUrlInputChange(event.target.value)}
+            placeholder="视频直链或视频网页地址（网页会自动解析）"
+          />
           <div className="screening-composer__actions">
+            <input value={titleInput} onChange={(event) => onTitleInputChange(event.target.value)} placeholder="可选标题" />
             <button
               className="action-pill action-pill--labeled"
               disabled={resolving}
@@ -838,7 +850,16 @@ export function ScreeningRoomPanel({
               }}
             >
               <PlayIcon />
-              <span>{resolving ? "解析中…" : "替换当前并开始"}</span>
+              <span>{resolving ? "解析中…" : "替换并播放"}</span>
+            </button>
+            <button
+              className="action-pill action-pill--labeled"
+              disabled={!canSkipToNext}
+              title={canSkipToNext ? "播放列表里的下一个视频" : isController ? "播放列表为空" : "只有控制者可以切换"}
+              onClick={handleSkipToNext}
+            >
+              <SkipNextIcon />
+              <span>下一个</span>
             </button>
             <button
               className="action-pill action-pill--labeled"
@@ -852,7 +873,7 @@ export function ScreeningRoomPanel({
               }}
             >
               <PlaylistAddIcon />
-              <span>加入播放列表</span>
+              <span>添加到播放列表</span>
             </button>
           </div>
         </div>

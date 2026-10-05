@@ -335,6 +335,16 @@ export function TrashIcon() {
 }
 
 /** 加入播放列表：列表 + 加号。 */
+/** 下一个：播放三角 + 竖线。 */
+export function SkipNextIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M6 6.5v11l8.6-5.5L6 6.5Z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+      <path d="M18 6.5v11" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export function PlaylistAddIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">

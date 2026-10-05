@@ -698,7 +698,9 @@ body {
   flex: 0 1 auto;
   min-height: 0;
   max-height: 58vh;
-  overflow: hidden;
+  /* 共享画面 + 头像放不下时在语音区内滚动，而不是被裁掉、让下方聊天面板盖住。 */
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .voice-presence-dock__title {

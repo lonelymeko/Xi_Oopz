@@ -71,6 +71,8 @@ export type ScreenSharePreset = {
  */
 export type ScreeningPlayerElement = HTMLElement & {
   src?: string;
+  /** vidstack 播放器状态快照，这里只用到是否已可播放。 */
+  state?: { canPlay?: boolean };
   currentTime: number;
   duration?: number;
   playbackRate: number;

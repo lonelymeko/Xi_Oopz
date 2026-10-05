@@ -349,7 +349,7 @@ button {
   justify-content: center;
 }
 
-/* 图标 + 文字的动作按钮（放映室“替换当前并开始 / 加入播放列表”）。
+/* 图标 + 文字的动作按钮（放映室“替换并播放 / 下一个 / 添加到播放列表”）。
  * 之前的两个按钮是纯文字，没有任何图标，视觉上很单调。 */
 .action-pill--labeled {
   display: inline-flex;
@@ -742,18 +742,11 @@ button {
 
 .screening-composer {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
-  align-items: end;
 }
 
-.screening-composer__inputs {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 220px;
-  gap: 12px;
-}
-
-.screening-composer__inputs input {
+.screening-composer input {
   width: 100%;
   height: 46px;
   padding: 0 16px;
@@ -769,11 +762,11 @@ button {
     background 0.18s ease;
 }
 
-.screening-composer__inputs input::placeholder {
+.screening-composer input::placeholder {
   color: #8c95a8;
 }
 
-.screening-composer__inputs input:focus {
+.screening-composer input:focus {
   border-color: rgba(109, 226, 210, 0.44);
   box-shadow: 0 0 0 4px rgba(109, 226, 210, 0.09);
   background: linear-gradient(180deg, rgba(24, 31, 44, 0.98), rgba(16, 22, 32, 0.98));
@@ -781,13 +774,23 @@ button {
 
 .screening-composer__actions {
   display: flex;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 8px;
   align-items: stretch;
 }
 
+/* 标题框占满按钮之外的剩余宽度；面板太窄放不下一行时按钮换行并撑满，而不是把标题框压没。 */
+.screening-composer__actions input {
+  flex: 100 1 64px;
+  min-width: 64px;
+  padding: 0 10px;
+}
+
 .screening-composer__actions .action-pill {
+  flex: 1 0 auto;
+  justify-content: center;
   min-height: 46px;
-  padding: 0 16px;
+  padding: 0 12px;
   border-radius: 14px;
   font-size: 0.84rem;
   font-weight: 700;
