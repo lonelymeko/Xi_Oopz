@@ -3,6 +3,14 @@ import { useEffect, useRef, useState } from "react";
 import { DownloadIcon, ExpandIcon, PauseIcon, PlayIcon, PlaylistAddIcon, PlaylistIcon, TrashIcon } from "./icons";
 import { buildApiUrl } from "../../config/runtime";
 import type { ScreeningPlaylistItem, ScreeningSnapshot, User, Channel } from "../../types";
+import {
+  decryptAES128Segment,
+  normalizeAES128Key,
+  parseHLSKeyLine,
+  patchMP4Duration,
+  sequenceIV,
+  type HLSSegmentKey,
+} from "../../utils/hlsDownload";
 import { isLikelyLiveScreeningURL } from "../../utils/live";
 import type { DownloadNoticeEvent, ScreeningPlayerElement } from "../../types/live";
 
@@ -75,6 +83,7 @@ export function ScreeningRoomPanel({
   const tickTimerRef = useRef<number | null>(null);
   const imageTickTimerRef = useRef<number | null>(null);
   const lastLoadedItemRef = useRef<string>("");
+  const canPlayUrlRef = useRef("");
   const lastAppliedJoinEpochRef = useRef(-1);
   const previousControllerRef = useRef(false);
   // Monotonic playback-sync anchor: project the controller's position using the viewer's
@@ -392,8 +401,7 @@ export function ScreeningRoomPanel({
       void extra;
     };
 
-    const handleCanPlay = () => {
-      logPlayerEvent("can-play");
+    const reportControllerReady = () => {
       if (!isController || !state?.awaitingReady || !state.currentItemId) return;
       onPlaybackEvent("screening.controller.ready", {
         itemId: state.currentItemId,
@@ -401,6 +409,16 @@ export function ScreeningRoomPanel({
         playbackRate: player.playbackRate || 1,
       });
     };
+    const handleCanPlay = () => {
+      logPlayerEvent("can-play");
+      canPlayUrlRef.current = player.src || "";
+      reportControllerReady();
+    };
+    // 播放器可能在房间进入“等待就绪”之前就已加载好同一地址（加载够快，或对正在放的地址重新发起放映），
+    // 此时不会再有 can-play 事件，需要按已就绪状态补报，否则房间一直停在 loading。
+    if (canPlayUrlRef.current && canPlayUrlRef.current === playbackUrl) {
+      reportControllerReady();
+    }
     const handlePlay = () => {
       logPlayerEvent("play");
       if (!isController || !state?.currentItemId) return;
@@ -482,6 +500,8 @@ export function ScreeningRoomPanel({
     const handleProviderChange = (event: Event) => {
       const provider = (event as CustomEvent<ScreeningHLSProvider | null>).detail;
       if (!provider || provider.type !== "hls" || !("config" in provider)) return;
+      // hls.js 随包分发并锁定版本，不再从 CDN 取浮动的最新版。
+      provider.library = () => import("hls.js");
       provider.config = {
         ...provider.config,
         fLoader: PNGWrappedTSFragmentLoader,
@@ -517,7 +537,7 @@ export function ScreeningRoomPanel({
       player.removeEventListener("error", handleError);
       player.removeEventListener("provider-change", handleProviderChange);
     };
-  }, [channel.id, isController, isLiveScreening, onPlaybackEvent, state]);
+  }, [channel.id, isController, isLiveScreening, onPlaybackEvent, state, playbackUrl]);
 
   useEffect(() => {
     const becameController = isController && !previousControllerRef.current;
@@ -961,10 +981,42 @@ export async function assembleHLSDownload(
 
   // 经典 MPEG-TS 分片：前端抓齐后拼接，再尝试转封装成 mp4。
   // 转封装失败（片源不是 H.264 或数据异常）就退回保存 .ts，绝不丢文件。
+  // AES-128 加密的分片要先解密，否则拼出来的文件既转不了 MP4 也没法播。
   onPhase?.("begin");
+  const segmentKeys: Array<{ key: HLSSegmentKey | null; sequence: number }> = [];
+  let totalDuration = 0;
+  let currentKey: HLSSegmentKey | null = null;
+  let sequence = 0;
+  for (const line of lines) {
+    if (line.startsWith("#EXT-X-MEDIA-SEQUENCE:")) {
+      sequence = Number.parseInt(line.slice("#EXT-X-MEDIA-SEQUENCE:".length), 10) || 0;
+    } else if (line.startsWith("#EXTINF:")) {
+      totalDuration += Number.parseFloat(line.slice("#EXTINF:".length)) || 0;
+    } else if (line.startsWith("#EXT-X-KEY:")) {
+      currentKey = parseHLSKeyLine(line, (ref) => absolutize(ref, manifestBase));
+    } else if (line && !line.startsWith("#")) {
+      segmentKeys.push({ key: currentKey, sequence });
+      sequence += 1;
+    }
+  }
+  const keyCache = new Map<string, ArrayBuffer>();
+  const loadKey = async (uri: string) => {
+    let key = keyCache.get(uri);
+    if (!key) {
+      key = normalizeAES128Key(await fetchBytesDirectFirst(uri));
+      keyCache.set(uri, key);
+    }
+    return key;
+  };
+
   const buffers: ArrayBuffer[] = [];
   for (let i = 0; i < parts.length; i++) {
-    buffers.push(await fetchBytesDirectFirst(parts[i]));
+    let data = await fetchBytesDirectFirst(parts[i]);
+    const { key, sequence: segmentSequence } = segmentKeys[i];
+    if (key) {
+      data = await decryptAES128Segment(data, await loadKey(key.uri), key.iv || sequenceIV(segmentSequence));
+    }
+    buffers.push(data);
     onProgress(i + 1, parts.length);
   }
 
@@ -975,7 +1027,8 @@ export async function assembleHLSDownload(
   if (remuxed) {
     return {
       mode: "blob",
-      blob: new Blob([remuxed as BlobPart], { type: "video/mp4" }),
+      // 转封装器写的是占位时长，按清单总时长修正，否则播放器显示的总长度是错的
+      blob: new Blob([(totalDuration > 0 ? patchMP4Duration(remuxed, totalDuration) : remuxed) as BlobPart], { type: "video/mp4" }),
       filename: withMediaExtension(baseName, ".mp4"),
       remuxed: true,
     };
@@ -1125,6 +1178,7 @@ type ImageSequencePlaylistState = {
 
 type ScreeningHLSProvider = {
   config: Record<string, unknown>;
+  library: unknown;
   type: string;
 };
 
