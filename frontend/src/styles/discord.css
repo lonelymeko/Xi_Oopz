@@ -695,12 +695,19 @@ body {
   margin: 0;
   padding: 8px 0 6px;
   border-bottom: 1px solid #232323;
-  flex: 0 1 auto;
+  /* 语音区占满聊天面板之外的全部高度（这就是它的上限），共享画面 + 头像放不下时在区内滚动。 */
+  flex: 1 1 auto;
   min-height: 0;
-  max-height: 58vh;
-  /* 共享画面 + 头像放不下时在语音区内滚动，而不是被裁掉、让下方聊天面板盖住。 */
   overflow-x: hidden;
   overflow-y: auto;
+}
+
+/* 语音区在场时聊天面板限高、不参与抢占，避免把上面的共享画面和头像挤掉；消息在面板内滚动。 */
+.voice-presence-dock ~ .chat-panel {
+  flex: 0 0 auto;
+  height: 32vh;
+  min-height: 200px;
+  max-height: 32vh;
 }
 
 .voice-presence-dock__title {

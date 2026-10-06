@@ -201,6 +201,15 @@ export function useLiveRuntime(options: UseLiveRuntimeOptions) {
             }
             return next;
           });
+          // RTC 通过 voiceMembersRef 判断对方是否在共享；ref 要等下一次渲染才跟上 state，
+          // 这里先同步写入，否则刚收到“开始共享”时读到的还是旧值，不会去请求对方的画面。
+          const sharingMember = voiceMembersRef.current.get(screenStatePayload.userId);
+          if (sharingMember) {
+            voiceMembersRef.current = new Map(voiceMembersRef.current).set(screenStatePayload.userId, {
+              ...sharingMember,
+              screenSharing: screenStatePayload.screenSharing,
+            });
+          }
           if (screenStatePayload.userId) {
             rtcRef.current?.handleScreenState(screenStatePayload.userId, Boolean(screenStatePayload.screenSharing));
           }
